@@ -1119,24 +1119,39 @@ async function sendTelegram(alerts, vix, errors, env, capitalInfo, regime, exits
   exits  = exits  || { toSell:[], toHold:[], errors:[] };
   alerts = alerts || [];
 
+  // Normalise le régime : accepte la forme brute (fetchRegime) et la forme
+  // sérialisée (buildFinalResult) qui ont des noms de champs différents.
+  const reg = regime ? {
+    name:       regime.name       || regime.regimeName || '?',
+    profile:    typeof regime.profile === 'string' ? regime.profile : (regime.profile?.profile || '?'),
+    allowEntry: regime.allowEntry ?? regime.profile?.allowEntry ?? true,
+    emoji:      regime.emoji      || regime.profile?.emoji      || '❓',
+    kelly:      regime.kelly      ?? regime.profile?.kelly      ?? 1,
+    capMult:    regime.capMult    ?? regime.profile?.capMult    ?? 1,
+    confidence: regime.confidence ?? 0,
+    features:   regime.features   || {},
+  } : null;
+
   const date = new Date().toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long', timeZone:'Europe/Paris' });
   const calls = alerts.filter(a => a.direction === 'CALL');
   const puts  = alerts.filter(a => a.direction === 'PUT');
   const nBuy  = alerts.length, nSell = exits.toSell.length, nHold = exits.toHold.length;
-  const isPanic = regime && !regime.profile.allowEntry;
+  const isPanic = reg && !reg.allowEntry;
 
-  const regimeLine = regime ? `\n🎯 *Régime* : ${regime.profile.emoji} ${regime.regimeName} → profil *${regime.profile.profile}* (kelly ×${regime.profile.kelly.toFixed(2)} · cap ×${regime.profile.capMult.toFixed(2)})` : '';
+  const regimeLine = reg
+    ? `\n🎯 *Régime* : ${reg.emoji} ${reg.name} → profil *${reg.profile}* (kelly ×${reg.kelly.toFixed(2)} · cap ×${reg.capMult.toFixed(2)})`
+    : '';
   const vixLine    = vix    ? `\n📡 *VSTOXX* : ${vix.current.toFixed(1)} _(${vix.regime.toUpperCase()})_ → sizing ×${(vix.mult||vixMultiplier(vix.current,'normal')).toFixed(2)} · cap ${Math.round((vix.dailyCap||0.6)*100)}%/compte` : '';
   const capLine    = capitalInfo ? `\n💼 *Capital* : ${capitalInfo.total.toLocaleString('fr-FR')}€ · ${capitalInfo.nbAccounts} compte(s)${capitalInfo.nbAccounts===2?' (A+B)':''}` : '';
 
   let msg;
 
   if (isPanic) {
-    msg  = `⛔ *WARRANTPRO — RÉGIME ${regime.regimeName}*\n_${date}_\n`;
+    msg  = `⛔ *WARRANTPRO — RÉGIME ${reg.name}*\n_${date}_\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━━\n`;
-    msg += `🔴 Régime : *${regime.regimeName}* (${regime.profile.profile})\n`;
-    msg += `📊 Confiance K-means : ×${regime.confidence.toFixed(2)}\n`;
-    msg += `📉 σ20=${(regime.features.sigma20*100).toFixed(0)}% · ret20=${(regime.features.ret20*100).toFixed(1)}%${vixLine}\n\n`;
+    msg += `🔴 Régime : *${reg.name}* (${reg.profile})\n`;
+    msg += `📊 Confiance K-means : ×${reg.confidence.toFixed(2)}\n`;
+    msg += `📉 σ20=${(reg.features.sigma20*100).toFixed(0)}% · ret20=${(reg.features.ret20*100).toFixed(1)}%${vixLine}\n\n`;
     msg += `*🚫 Aucune nouvelle entrée recommandée aujourd'hui.*\n\n`;
     if (nSell > 0) { msg += `🟠 *${nSell} POSITION(S) À VENDRE* :\n━━━━━━━━━━━━━━━━━━━━━━\n`; for (const p of exits.toSell.slice(0,8)) msg += buildExitBlock(p); }
     else if (exits.toHold.length > 0) msg += `📌 ${exits.toHold.length} position(s) en CONSERVER.\n\n`;
