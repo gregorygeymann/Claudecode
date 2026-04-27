@@ -398,6 +398,22 @@ export default {
       return new Response(JSON.stringify(raw ? JSON.parse(raw) : { positions:[], updatedAt:null, count:0 }), { headers: CORS });
     }
 
+    // Indicateurs bruts des 10 premiers tickers (sans filtre signal) — diagnostic
+    if (url.pathname === '/debug') {
+      await getYahooSession(env);
+      const sample = TK_CORE.slice(0, 10);
+      const rows   = [];
+      for (const tk of sample) {
+        try {
+          const b   = await fetchBars(tk.t, '1y', '1d', env);
+          const ind = b.length > 70 ? scanIndicators(b) : null;
+          rows.push({ ticker:tk.t, bars:b.length, z:ind?.z??null, rsi:ind?.rsi??null, sq:ind?.sq??null, ret5:ind?Math.round(ind.ret5*1000)/10:null, ret63:ind?.ret63??null, vol60:ind?.vol60??null, signal:ind?(detectSignal(ind)?.dir??'none'):'no_data' });
+        } catch (e) { rows.push({ ticker:tk.t, error:e.message }); }
+        await sleep(100);
+      }
+      return new Response(JSON.stringify(rows, null, 2), { headers: CORS });
+    }
+
     return new Response(JSON.stringify({ status:'ok', worker:'WarrantPro', batches:{ a:TK_BATCH_A.length, b:TK_BATCH_B.length } }), { headers: CORS });
   },
 };
@@ -1061,8 +1077,10 @@ function recommendForPosition(position, bars) {
 
   if (warrantPnL >= 0.30 && daysHeld <= 5) return { action:'VENDRE', color:'G', reason:`🎯 TP ULTRA : warrant +${(warrantPnL*100).toFixed(1)}% en ${daysHeld}j`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
   if (warrantPnL >= 0.25)                  return { action:'VENDRE', color:'G', reason:`✅ TP WARRANT : +${(warrantPnL*100).toFixed(1)}% atteint`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
-  if (position.type==='CALL' && underlyingPnL >= 0.03)  return { action:'VENDRE', color:'G', reason:`✅ TP SOUS-JACENT : +${(underlyingPnL*100).toFixed(1)}%`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
-  if (position.type==='CALL' && underlyingPnL <= -0.05) return { action:'VENDRE', color:'R', reason:`🛑 STOP LOSS : sous-jacent ${(underlyingPnL*100).toFixed(1)}%`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
+  if (position.type==='CALL' && underlyingPnL >= 0.03)  return { action:'VENDRE', color:'G', reason:`✅ TP SOUS-JACENT CALL : +${(underlyingPnL*100).toFixed(1)}%`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
+  if (position.type==='CALL' && underlyingPnL <= -0.05) return { action:'VENDRE', color:'R', reason:`🛑 STOP LOSS CALL : sous-jacent ${(underlyingPnL*100).toFixed(1)}%`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
+  if (position.type==='PUT'  && underlyingPnL <= -0.03) return { action:'VENDRE', color:'G', reason:`✅ TP SOUS-JACENT PUT : ${(underlyingPnL*100).toFixed(1)}%`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
+  if (position.type==='PUT'  && underlyingPnL >= 0.05)  return { action:'VENDRE', color:'R', reason:`🛑 STOP LOSS PUT : sous-jacent +${(underlyingPnL*100).toFixed(1)}%`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
   const holdMax = position.matu === '1M' ? 10 : 14;
   if (daysHeld >= holdMax) return { action:'VENDRE', color:'Y', reason:`⏰ HOLD MAX (${holdMax}j) atteint`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
   if (position.matu==='1M' && (maxDays-daysHeld) <= 7) return { action:'VENDRE', color:'Y', reason:`⏰ THETA CRITIQUE : ${maxDays-daysHeld}j avant expiration 1M`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
