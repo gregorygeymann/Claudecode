@@ -303,7 +303,7 @@ export default {
 
     if (url.pathname === '/ping') {
       return new Response(JSON.stringify({
-        ok: true, version: 'worker_v22',
+        ok: true, version: 'worker_v26',
         timestamp: new Date().toISOString(),
         env: {
           TG_TOKEN:    env.TG_TOKEN   ? `présent (${env.TG_TOKEN.slice(0,8)}...)` : '❌ MANQUANT',
@@ -663,6 +663,19 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
       if (al.sectorCorr?.status === 'idiosyncratic') szAdj *= 0.7;
       else if (al.sectorCorr?.status === 'sectorial') szAdj *= 1.1;
 
+      // ── v26.1 : Overnight A + TOM B actifs (OOS validés A+B +7.2%) ──
+      // C (beta-conditional) et D (half-month) désactivés — OOS négatif SBF120+DAX40
+      let overnightMult = 1.0;
+      if (al.ind.gapPct !== undefined && al.ind.gapPct < -2) overnightMult = 1.20;
+      else if (al.ind.gapPct !== undefined && al.ind.gapPct < -1) overnightMult = 1.10;
+      szAdj *= overnightMult;
+
+      let tomMult = 1.0;
+      const scanDom = scanDate.getDate();
+      const scanLastDom = new Date(scanDate.getFullYear(), scanDate.getMonth() + 1, 0).getDate();
+      if (scanDom >= scanLastDom - 2 || scanDom <= 3) tomMult = 1.20;
+      szAdj *= tomMult;
+
       szAdj = Math.min(0.25, szAdj);
       if (regimeBlocked || regimeFiltered) szAdj = 0;
 
@@ -743,6 +756,8 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
           nbAccounts:   NB_ACC,
           mm200Mult:    Math.round(mm200Mult*100)/100,
           isFriday,     sectorCapped,
+          overnightMult: Math.round(overnightMult * 100) / 100,  // v26 : overnight reversal
+          tomMult:       Math.round(tomMult * 100) / 100,        // v26 : turn-of-month
         },
         // ── Infos warrant pour Telegram ──
         warrant: {
@@ -1156,7 +1171,7 @@ async function sendTelegram(alerts, vix, errors, env, capitalInfo, regime, exits
     if (nSell > 0) { msg += `🟠 *${nSell} POSITION(S) À VENDRE* :\n━━━━━━━━━━━━━━━━━━━━━━\n`; for (const p of exits.toSell.slice(0,8)) msg += buildExitBlock(p); }
     else if (exits.toHold.length > 0) msg += `📌 ${exits.toHold.length} position(s) en CONSERVER.\n\n`;
     else if (exits.note) msg += `_${exits.note}_\n\n`;
-    msg += `_Validation empirique v22 : régime-switching évite -36% MaxDD_`;
+    msg += `_v26 · régime-switching évite -36% MaxDD · Overnight A+TOM B actifs_`;
 
   } else if (nBuy === 0 && nSell === 0) {
     msg  = `😴 *WARRANTPRO — JOURNÉE CALME*\n_${date}_\n`;
@@ -1185,12 +1200,12 @@ async function sendTelegram(alerts, vix, errors, env, capitalInfo, regime, exits
     msg += `\n_Backtest validé · cooldown 7j actif_`;
 
   } else {
-    msg  = `📈 *WARRANTPRO v22 — ${date.toUpperCase()}*\n`;
+    msg  = `📈 *WARRANTPRO v26 — ${date.toUpperCase()}*\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━━\n`;
     msg += `*${nBuy} signal(s) ACHAT* : 🟢 ${calls.length} CALL · 🔴 ${puts.length} PUT`;
     if (nSell > 0) msg += ` · ⚠️ *${nSell} à VENDRE*`;
     msg += `${regimeLine}${vixLine}${capLine}\n`;
-    msg += `_Backtest validé · 18 tests · PF=2.01 · cooldown 7j actif_\n\n`;
+    msg += `_v26 : Overnight A+TOM B actifs (+7.2% OOS) · 18 tests · PF=2.01 · cooldown 7j_\n\n`;
 
     if (nSell > 0) {
       msg += `🟠 *${nSell} POSITION(S) À VENDRE* (priorité) :\n━━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -1307,6 +1322,10 @@ function buildSignalBlock(al) {
   block += `• Émetteur         : *${typeof al.issuer === 'string' ? al.issuer : (al.issuer?.recommended || 'voir courtier')}*\n`;
   block += `• *Montant : ${(al.sizing?.amountEur || 0).toLocaleString('fr-FR')}€* (${al.sizing?.szPct || 0}% du capital, ${acctLbl})\n`;
   block += `• Quantité estimée : ~${(al.sizing?.qty || 0).toLocaleString('fr-FR')} warrants${overflowWarn}\n`;
+  const v26Boosts = [];
+  if ((al.sizing?.overnightMult||1) > 1) v26Boosts.push(`Overnight ×${al.sizing.overnightMult}`);
+  if ((al.sizing?.tomMult||1) > 1)       v26Boosts.push(`TOM ×${al.sizing.tomMult}`);
+  if (v26Boosts.length) block += `• 🔬 v26 : ${v26Boosts.join(' · ')}\n`;
   block += `• ${urgency}\n\n`;
 
   // ── Seuils de sortie ──
