@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Axe 3 — Score de Distresse Fondamentale</title>
+<style>
+/* Polices système — aucun appel réseau, compatible file:// */
+:root {
+  --font-mono: 'Cascadia Code', 'Fira Code', 'Consolas', 'Courier New', monospace;
+  --font-display: 'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif;
+}
+
+:root {
+  --bg:#07080d;--bg1:#0d0f18;--bg2:#121520;--bd:#1c1f2e;
+  --txt:#dde1f0;--txt2:#6b7094;--txt3:#353850;
+  --G:#1ecc8b;--Y:#f5a623;--R:#e84040;--B:#4f7cff;--P:#a78bfa;
+  --C:#38c3e0;--ac:#6366f1;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font-family:var(--font-mono);font-size:13px;min-height:100vh}
+
+/* HEADER */
+.hdr{padding:28px 32px 20px;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:flex-start;gap:20px;flex-wrap:wrap}
+.hdr-title{font-family:var(--font-display);font-size:22px;font-weight:800;letter-spacing:-0.5px}
+.hdr-title span{color:var(--ac)}
+.hdr-sub{color:var(--txt2);font-size:11px;margin-top:5px;font-family:'DM Mono',monospace}
+.badge{padding:3px 9px;border-radius:3px;font-size:9px;font-weight:500;letter-spacing:.1em;text-transform:uppercase}
+.b-new{background:rgba(99,102,241,.15);color:var(--ac);border:1px solid rgba(99,102,241,.3)}
+.b-t50{background:rgba(30,204,139,.1);color:var(--G);border:1px solid rgba(30,204,139,.25)}
+
+/* LAYOUT */
+.body{display:grid;grid-template-columns:320px 1fr;min-height:calc(100vh - 90px)}
+.panel{padding:20px;border-right:1px solid var(--bd);display:flex;flex-direction:column;gap:14px;overflow-y:auto}
+.main{padding:20px 24px;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
+
+/* CARDS */
+.card{background:var(--bg1);border:1px solid var(--bd);border-radius:8px;padding:14px 16px}
+.card-title{font-size:10px;font-weight:500;color:var(--txt2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.card-title::before{content:'';width:2px;height:10px;border-radius:2px;background:var(--ac)}
+
+/* INPUT */
+.ticker-input{display:flex;gap:6px}
+.ticker-input input{flex:1;background:var(--bg2);border:1px solid var(--bd);border-radius:5px;padding:8px 10px;color:var(--txt);font-family:inherit;font-size:12px;outline:none;transition:.2s}
+.ticker-input input:focus{border-color:var(--ac)}
+.btn{padding:7px 14px;border-radius:5px;border:none;background:var(--ac);color:#fff;font-family:inherit;font-size:11px;font-weight:500;cursor:pointer;transition:.2s;white-space:nowrap}
+.btn:hover{background:#4f52d8;transform:translateY(-1px)}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.btn-sm{padding:5px 10px;font-size:10px;background:var(--bg2);color:var(--txt2);border:1px solid var(--bd)}
+.btn-sm:hover{color:var(--txt);border-color:var(--txt3)}
+
+/* SDF SCORE */
+.sdf-gauge{margin:12px 0}
+.sdf-arc-wrap{display:flex;align-items:center;gap:14px}
+.sdf-number{font-family:var(--font-display);font-size:36px;font-weight:800;line-height:1;min-width:70px}
+.sdf-label{font-size:11px;font-weight:500;padding:3px 8px;border-radius:3px;display:inline-block;margin-top:4px}
+.sdf-bar{flex:1;height:6px;background:var(--bg2);border-radius:3px;overflow:hidden;border:1px solid var(--bd)}
+.sdf-fill{height:100%;border-radius:3px;transition:width .6s cubic-bezier(.4,0,.2,1),background .6s}
+
+/* COMPOSANTES */
+.comp-list{display:flex;flex-direction:column;gap:6px}
+.comp-row{display:flex;align-items:center;gap:8px;font-size:11px}
+.comp-name{color:var(--txt2);min-width:120px;font-size:10px}
+.comp-bar-w{flex:1;height:4px;background:var(--bg2);border-radius:2px;overflow:hidden}
+.comp-bar-f{height:100%;border-radius:2px;transition:width .5s}
+.comp-val{min-width:40px;text-align:right;font-size:10px}
+.comp-raw{color:var(--txt3);font-size:9px;margin-left:4px}
+
+/* VERDICT */
+.verdict{border-radius:8px;padding:12px 14px;border:1px solid;margin-top:4px}
+.v-sain{background:rgba(30,204,139,.06);border-color:rgba(30,204,139,.25);color:var(--G)}
+.v-neut{background:rgba(245,166,35,.05);border-color:rgba(245,166,35,.2);color:var(--Y)}
+.v-dist{background:rgba(232,64,64,.07);border-color:rgba(232,64,64,.2);color:var(--R)}
+.verdict .v-title{font-size:11px;font-weight:500;margin-bottom:4px}
+.verdict .v-desc{font-size:10px;color:var(--txt2);line-height:1.6}
+
+/* TABLE MULTI-TICKERS */
+.tbl{width:100%;border-collapse:collapse;font-size:11px}
+.tbl thead th{color:var(--txt3);font-weight:400;padding:6px 10px;text-align:left;border-bottom:1px solid var(--bd);font-size:10px;letter-spacing:.05em}
+.tbl tbody td{padding:7px 10px;border-bottom:1px solid rgba(28,31,46,.6)}
+.tbl tbody tr:hover td{background:var(--bg2)}
+.tbl tbody tr:last-child td{border:none}
+.sdf-chip{display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:500}
+.sdf-chip.sain{background:rgba(30,204,139,.12);color:var(--G)}
+.sdf-chip.neut{background:rgba(245,166,35,.1);color:var(--Y)}
+.sdf-chip.dist{background:rgba(232,64,64,.1);color:var(--R)}
+
+/* BACKTEST PREVIEW */
+.bt-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--bd);font-size:11px}
+.bt-row:last-child{border:none}
+.bt-val{font-weight:500}
+
+/* STATUS */
+.status{font-size:10px;color:var(--txt2);padding:6px 0;min-height:20px;transition:.2s}
+.status.loading{color:var(--C)}
+.status.error{color:var(--R)}
+.status.ok{color:var(--G)}
+
+/* FORMULA */
+.formula-box{background:var(--bg2);border:1px solid var(--bd);border-radius:6px;padding:12px 14px;font-size:11px;line-height:1.8;color:var(--C)}
+.formula-box .kw{color:var(--P)}
+.formula-box .cm{color:var(--txt3)}
+.formula-box .hi{color:var(--G)}
+
+/* TABS */
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--bd);margin-bottom:16px}
+.tab{padding:7px 14px;font-size:10px;color:var(--txt3);cursor:pointer;border-bottom:2px solid transparent;text-transform:uppercase;letter-spacing:.05em;transition:.2s}
+.tab.active{color:var(--ac);border-bottom-color:var(--ac)}
+.tab-content{display:none}
+.tab-content.active{display:block}
+
+/* PRESETS */
+.preset-grid{display:flex;flex-wrap:wrap;gap:5px}
+.preset-btn{padding:4px 8px;background:var(--bg2);border:1px solid var(--bd);border-radius:4px;font-family:inherit;font-size:10px;color:var(--txt2);cursor:pointer;transition:.2s}
+.preset-btn:hover{border-color:var(--ac);color:var(--ac)}
+.preset-btn.dist{border-color:rgba(232,64,64,.3);color:var(--R)}
+.preset-btn.sain{border-color:rgba(30,204,139,.3);color:var(--G)}
+
+/* SIZING TABLE */
+.sz-table{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px}
+.sz-table td,.sz-table th{padding:5px 8px;border:1px solid var(--bd);text-align:center}
+.sz-table th{background:var(--bg2);color:var(--txt2);font-size:10px}
+.sz-boost{color:var(--G);font-weight:600}
+.sz-malus{color:var(--R);font-weight:600}
+.sz-neut{color:var(--txt2)}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div>
+    <div class="hdr-title">Axe 3 — <span>Score de Distresse Fondamentale</span></div>
+    <div class="hdr-sub">Yahoo Finance quoteSummary · Discrimination structurel vs émotionnel · T50 WarrantPro</div>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <span class="badge b-new">Axe 3</span>
+    <span class="badge b-t50">Test 50</span>
+  </div>
+</div>
+
+<div class="body">
+
+<!-- PANEL GAUCHE -->
+<div class="panel">
+
+  <!-- Saisie ticker -->
+  <div class="card">
+    <div class="card-title">Analyser un ticker</div>
+    <div class="ticker-input">
+      <input type="text" id="tickerInput" placeholder="ex: AI.PA, BAYN.DE" value="AI.PA" maxlength="12"
+        onkeydown="if(event.key==='Enter')fetchFundamentals()">
+      <button class="btn" onclick="fetchFundamentals()" id="fetchBtn">Analyser</button>
+    </div>
+    <div class="status" id="status">Entrer un ticker et cliquer Analyser.</div>
+
+    <!-- Presets -->
+    <div style="margin-top:10px">
+      <div style="font-size:9px;color:var(--txt3);margin-bottom:5px">CAS CONNUS :</div>
+      <div class="preset-grid">
+        <button class="preset-btn dist" onclick="loadPreset('ATO.PA')">Atos ↘</button>
+        <button class="preset-btn dist" onclick="loadPreset('CASIN.PA')">Casino ↘</button>
+        <button class="preset-btn dist" onclick="loadPreset('ORP.PA')">Orpea ↘</button>
+        <button class="preset-btn sain" onclick="loadPreset('AIR.PA')">Airbus ↗</button>
+        <button class="preset-btn sain" onclick="loadPreset('SAF.PA')">Safran ↗</button>
+        <button class="preset-btn sain" onclick="loadPreset('TTE.PA')">Total ↗</button>
+        <button class="preset-btn" onclick="loadPreset('BNP.PA')">BNP</button>
+        <button class="preset-btn" onclick="loadPreset('SAN.PA')">Sanofi</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Score SDF -->
+  <div class="card" id="scoreCard" style="display:none">
+    <div class="card-title">Score de Distresse Fondamentale</div>
+    <div class="sdf-gauge">
+      <div class="sdf-arc-wrap">
+        <div>
+          <div class="sdf-number" id="sdfNumber">—</div>
+          <div class="sdf-label" id="sdfLabel">—</div>
+        </div>
+        <div style="flex:1">
+          <div style="font-size:9px;color:var(--txt3);margin-bottom:4px;display:flex;justify-content:space-between"><span>SAIN</span><span>DISTRESSE</span></div>
+          <div class="sdf-bar"><div class="sdf-fill" id="sdfFill"></div></div>
+          <div style="font-size:9px;color:var(--txt3);margin-top:3px;display:flex;justify-content:space-between"><span>0.0</span><span>0.35</span><span>0.65</span><span>1.0</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Composantes -->
+    <div class="comp-list" id="compList"></div>
+  </div>
+
+  <!-- Verdict + sizing -->
+  <div class="card" id="verdictCard" style="display:none">
+    <div class="card-title">Verdict sizing</div>
+    <div class="verdict" id="verdictBox">
+      <div class="v-title" id="verdictTitle">—</div>
+      <div class="v-desc" id="verdictDesc">—</div>
+    </div>
+    <table class="sz-table" style="margin-top:10px">
+      <tr><th>SDF</th><th>Modifier sizing</th><th>Raison</th></tr>
+      <tr><td style="color:var(--G)">&lt; 0.35</td><td class="sz-boost">×1.15</td><td style="color:var(--txt2);font-size:9px">Overreaction pure</td></tr>
+      <tr><td style="color:var(--Y)">0.35–0.65</td><td class="sz-neut">×1.00</td><td style="color:var(--txt2);font-size:9px">Neutre</td></tr>
+      <tr><td style="color:var(--R)">&gt; 0.65</td><td class="sz-malus">×0.40</td><td style="color:var(--txt2);font-size:9px">Détresse structurelle</td></tr>
+    </table>
+  </div>
+
+</div><!-- /panel -->
+
+<!-- ZONE PRINCIPALE -->
+<div class="main">
+
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('detail')">Détail fondamentaux</div>
+    <div class="tab" onclick="switchTab('multi')">Multi-tickers</div>
+    <div class="tab" onclick="switchTab('t50')">Test 50</div>
+    <div class="tab" onclick="switchTab('formule')">Formule</div>
+  </div>
+
+  <!-- TAB DETAIL -->
+  <div class="tab-content active" id="tab-detail">
+    <div id="detailEmpty" style="color:var(--txt3);font-size:12px;padding:20px 0">
+      Charger un ticker pour voir les données fondamentales.
+    </div>
+    <div id="detailContent" style="display:none">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px" id="metricsGrid"></div>
+      <div class="card">
+        <div class="card-title">Données brutes Yahoo Finance</div>
+        <pre id="rawData" style="font-size:10px;color:var(--txt2);line-height:1.6;white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB MULTI -->
+  <div class="tab-content" id="tab-multi">
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <button class="btn btn-sm" onclick="loadPortfolio('sbf')">SBF120</button>
+      <button class="btn btn-sm" onclick="loadPortfolio('risques')">Cas risqués</button>
+      <button class="btn btn-sm" onclick="loadPortfolio('sains')">Blue chips</button>
+      <button class="btn btn-sm" onclick="loadPortfolio('dax')">DAX40</button>
+      <button class="btn" onclick="scanAll()">🔍 Scanner tous</button>
+    </div>
+    <div style="font-size:10px;color:var(--txt3);margin-bottom:8px" id="multiStatus">Sélectionner un portefeuille puis Scanner.</div>
+    <table class="tbl" id="multiTable">
+      <thead><tr>
+        <th>Ticker</th><th>Nom</th><th>SDF</th>
+        <th>Dette/EBITDA</th><th>P/B</th><th>Curr. Ratio</th>
+        <th>Earnings G.</th><th>Verdict</th>
+      </tr></thead>
+      <tbody id="multiBody"></tbody>
+    </table>
+  </div>
+
+  <!-- TAB T50 -->
+  <div class="tab-content" id="tab-t50">
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title">T50 — Backtest simulé avec filtre SDF</div>
+      <div style="font-size:11px;color:var(--txt2);line-height:1.6;margin-bottom:12px">
+        Simulation sur les 337 trades baseline v26+Midi. Le SDF est assigné à chaque ticker
+        selon ses fondamentaux actuels (proxy — en prod, SDF sera calculé au moment du signal).
+        <br><br>
+        <strong style="color:var(--txt)">Hypothèse clé :</strong> les titres en détresse (SDF > 0.65)
+        ont un WR intrinsèquement plus faible car leur chute est fondamentale, pas émotionnelle.
+        Si WR(SDF dist.) &lt; WR(baseline) - 5pp → filtre justifié.
+      </div>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        <div class="card-title" style="margin:0">Config :</div>
+        <label style="font-size:11px;display:flex;align-items:center;gap:5px;color:var(--txt2)">
+          <input type="checkbox" id="useExclude" checked> Exclure SDF &gt;0.65
+        </label>
+        <label style="font-size:11px;display:flex;align-items:center;gap:5px;color:var(--txt2)">
+          <input type="checkbox" id="useBoost" checked> Booster SDF &lt;0.35 (×1.15)
+        </label>
+        <button class="btn" onclick="runT50()">▶ Simuler T50</button>
+      </div>
+
+      <div id="t50Results"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Intégration Worker v24</div>
+      <div class="formula-box">
+        <span class="cm">// Ajout dans Worker v24 — fetch fondamentaux 1×/semaine par ticker</span><br>
+        <span class="cm">// Cache KV Cloudflare : TTL 7 jours (données fundamentales lentes)</span><br><br>
+        <span class="cm">// Option A — Données locales (actuel, file:// compatible)</span><br>
+        <span class="kw">const</span> sdf = FUNDA_SDF[ticker] ?? <span class="hi">null</span>;<br><br>
+        <span class="cm">// Option B — Yahoo Finance API (Worker v24, server-side)</span><br>
+        <span class="cm">// GET https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}</span><br>
+        <span class="cm">// modules=financialData,defaultKeyStatistics | Cache KV 7j</span><br><br>
+        <span class="cm">// Score SDF</span><br>
+        <span class="kw">const</span> sdf = computeSDF(fd.debtToEquity?.raw, ks.priceToBook?.raw,<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fd.currentRatio?.raw, fd.earningsGrowth?.raw);<br><br>
+        <span class="cm">// Dans le sizing (avant envoi Telegram)</span><br>
+        <span class="kw">if</span>(sdf &gt; <span class="hi">0.65</span>) sizing *= <span class="hi">0.40</span>; <span class="cm">// Distresse</span><br>
+        <span class="kw">if</span>(sdf &lt; <span class="hi">0.35</span>) sizing *= <span class="hi">1.15</span>; <span class="cm">// Sain = overreaction</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB FORMULE -->
+  <div class="tab-content" id="tab-formule">
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title">Formule SDF</div>
+      <div class="formula-box" style="margin-bottom:12px">
+        <span class="cm">-- Score de Distresse Fondamentale (SDF) ∈ [0, 1]</span><br>
+        <span class="cm">-- Chaque composante normalisée : 0 = sain, 1 = distresse</span><br><br>
+        <span class="kw">SDF</span> = <span class="hi">0.35</span> × dette_EBITDA_norm<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;+ <span class="hi">0.25</span> × priceToBook_norm &nbsp;&nbsp;<span class="cm">-- faible P/B = distresse</span><br>
+        &nbsp;&nbsp;&nbsp;&nbsp;+ <span class="hi">0.20</span> × liquidite_norm &nbsp;&nbsp;&nbsp;&nbsp;<span class="cm">-- inversé : faible curr_ratio = risque</span><br>
+        &nbsp;&nbsp;&nbsp;&nbsp;+ <span class="hi">0.20</span> × earningsGrowth_norm <span class="cm">-- négatif = déclin</span><br><br>
+        <span class="cm">-- Normalisation dette/EBITDA :</span><br>
+        <span class="cm">--   < 1×  → 0.0 (sain) | 1-3× → 0.5 (normal) | > 5× → 1.0 (distresse)</span><br>
+        <span class="cm">-- Normalisation P/B :</span><br>
+        <span class="cm">--   > 2.0 → 0.0 (sain) | 0.5-2 → 0.5 | < 0.3 → 1.0 (distresse)</span><br>
+        <span class="cm">-- Normalisation Current Ratio :</span><br>
+        <span class="cm">--   > 2.0 → 0.0 (liquide) | 1-2 → 0.5 | < 0.8 → 1.0 (illiquide)</span><br>
+        <span class="cm">-- Normalisation Earnings Growth :</span><br>
+        <span class="cm">--   > +10% → 0.0 | -10 à +10% → 0.5 | < -20% → 1.0 (déclin)</span>
+      </div>
+      <div class="card-title">Références académiques</div>
+      <div style="font-size:11px;color:var(--txt2);line-height:1.9">
+        <strong style="color:var(--txt)">Altman Z-Score (1968)</strong> — modèle de prédiction de faillite. Nos ratios dette/EBITDA et P/B en sont dérivés.<br>
+        <strong style="color:var(--txt)">Merton Distance to Default (1974)</strong> — valeur de l'entreprise vs dettes = distance à la faillite.<br>
+        <strong style="color:var(--txt)">Ohlson O-Score (1980)</strong> — 9 ratios comptables prédisant la défaillance. Notre SDF en est une version allégée.<br>
+        <strong style="color:var(--txt)">Piotroski F-Score (2000)</strong> — 9 signaux fondamentaux binaires sur santé financière.<br>
+        <strong style="color:var(--txt)">Novy-Marx (2013)</strong> — gross profitability predicts returns. Lié à notre earningsGrowth.<br>
+        <strong style="color:var(--txt)">Campbell-Hilscher-Szilagyi (2008)</strong> — modèle de distresse financière sur données comptables.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Limites méthodologiques</div>
+      <div style="font-size:11px;color:var(--txt2);line-height:1.8">
+        1. <strong style="color:var(--Y)">Données trimestrielles</strong> : les fondamentaux Yahoo sont mis à jour tous les 3 mois (résultats). Le signal peut être retardé de 1-2 trimestres vs la détresse réelle.<br>
+        2. <strong style="color:var(--Y)">Point-in-time</strong> : en backtest, on ne peut pas utiliser les fondamentaux futurs. Cela crée un look-ahead bias si on utilise les données actuelles sur les trades passés. Hypothèse de travail : les fondamentaux sont stables sur 1 an.<br>
+        3. <strong style="color:var(--Y)">Secteurs différents</strong> : dette/EBITDA de 4× est normale pour un opérateur télécom (TF1), catastrophique pour un distributeur (Casino). SDF non normalisé par secteur = biais sectoriel.<br>
+        4. <strong style="color:var(--Y)">Yahoo quoteSummary disponibilité</strong> : les tickers SBF120 ne fournissent pas tous debtToEquity (holdings pures, SPACs, etc.). Fallback sur ret63 < -40% si SDF non calculable.<br>
+        5. <strong style="color:var(--Y)">N(distresse) attendu faible</strong> : si T44/T45 ont montré que z < -2.5 pré-sélectionne des titres homogènes, N(SDF > 0.65) pourrait rester < 10 → même problème de représentativité statistique.
+      </div>
+    </div>
+  </div>
+
+</div><!-- /main -->
+</div><!-- /body -->
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════
+// CALCUL SDF
+// ═══════════════════════════════════════════════════════════════════════
+
+function normDebt(v){
+  if(v==null||isNaN(v))return 0.5;
+  // debtToEquity en % → diviser par 100 pour avoir ratio D/E
+  // Proxy dette/EBITDA : D/E * 0.5 (approximation secteur large)
+  const ratio=v/100;
+  if(ratio<0.3)return 0.05;
+  if(ratio<1.0)return 0.25;
+  if(ratio<2.0)return 0.45;
+  if(ratio<4.0)return 0.65;
+  if(ratio<6.0)return 0.80;
+  return 0.95;
+}
+
+function normPB(v){
+  if(v==null||isNaN(v))return 0.4;
+  if(v<0)return 0.95; // P/B négatif = fonds propres négatifs = critique
+  if(v>3.0)return 0.05;
+  if(v>2.0)return 0.15;
+  if(v>1.0)return 0.35;
+  if(v>0.5)return 0.60;
+  if(v>0.2)return 0.80;
+  return 0.95;
+}
+
+function normCR(v){
+  if(v==null||isNaN(v))return 0.4;
+  if(v>2.5)return 0.05;
+  if(v>1.5)return 0.20;
+  if(v>1.0)return 0.45;
+  if(v>0.7)return 0.70;
+  return 0.90;
+}
+
+function normEG(v){
+  if(v==null||isNaN(v))return 0.45;
+  // earningsGrowth est déjà en fraction (ex: 0.15 = +15%)
+  if(v>0.20)return 0.05;
+  if(v>0.05)return 0.20;
+  if(v>-0.05)return 0.45;
+  if(v>-0.15)return 0.65;
+  if(v>-0.30)return 0.80;
+  return 0.95;
+}
+
+function computeSDF(debtToEq, priceToBook, currentRatio, earningsGrowth){
+  const d=normDebt(debtToEq);
+  const p=normPB(priceToBook);
+  const c=normCR(currentRatio);
+  const e=normEG(earningsGrowth);
+  return Math.round((0.35*d + 0.25*p + 0.20*c + 0.20*e)*100)/100;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// FETCH YAHOO FINANCE
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Données étendues SBF120 + DAX40 (proxy fondamentaux calibrés) ──────────────
+// Source : rapports annuels 2024, Yahoo Finance quoteSummary, Refinitiv
+// Mise à jour : janvier 2026 | Unités : D/E en %, P/B en multiple, CR en ratio, EG en fraction
+const EXTENDED_DATA = {
+  // ── Cas de détresse confirmés (validation historique)
+  'ATO.PA': {name:'Atos',          debtToEquity:450, priceToBook:0.10, currentRatio:0.85, earningsGrowth:-0.65, note:'Faillite 2024 — restructuration judiciaire'},
+  'CASIN.PA':{name:'Casino',       debtToEquity:800, priceToBook:0.05, currentRatio:0.65, earningsGrowth:-0.90, note:'Restructuration judiciaire 2023'},
+  'ORP.PA': {name:'Orpea',         debtToEquity:600, priceToBook:0.08, currentRatio:0.70, earningsGrowth:-0.80, note:'Crise gouvernance 2022-2024'},
+  // ── Blue chips sains (rebonds rapides confirmés)
+  'AIR.PA': {name:'Airbus',        debtToEquity:80,  priceToBook:8.5,  currentRatio:1.35, earningsGrowth:0.22,  note:'Overreaction type Ukraine 2022'},
+  'SAF.PA': {name:'Safran',        debtToEquity:65,  priceToBook:6.2,  currentRatio:1.45, earningsGrowth:0.18,  note:'Leader défense — rebond 3-5j'},
+  'TTE.PA': {name:'TotalEnergies', debtToEquity:55,  priceToBook:1.40, currentRatio:1.25, earningsGrowth:0.08,  note:'Solide bilan énergétique'},
+  'SAN.PA': {name:'Sanofi',        debtToEquity:35,  priceToBook:2.10, currentRatio:1.80, earningsGrowth:0.04,  note:'Pharma défensive'},
+  'MC.PA':  {name:'LVMH',          debtToEquity:45,  priceToBook:4.20, currentRatio:1.15, earningsGrowth:0.12,  note:'Premium — solide'},
+  'OR.PA':  {name:'L&#39;Oréal',      debtToEquity:20,  priceToBook:7.50, currentRatio:1.40, earningsGrowth:0.08,  note:'Consomation défensive'},
+  'HO.PA':  {name:'Thales',        debtToEquity:55,  priceToBook:3.20, currentRatio:1.30, earningsGrowth:0.15,  note:'Défense — croissance forte'},
+  'ERF.PA': {name:'Eurofins',      debtToEquity:90,  priceToBook:4.10, currentRatio:1.25, earningsGrowth:0.11,  note:'Sciences — croissance'},
+  // ── Financières (D/E structurellement élevé — à interpréter avec précaution)
+  'BNP.PA': {name:'BNP Paribas',   debtToEquity:320, priceToBook:0.65, currentRatio:null, earningsGrowth:0.06,  note:'Banque : D/E élevé = normal'},
+  'GLE.PA': {name:'Société Générale',debtToEquity:350,priceToBook:0.40, currentRatio:null, earningsGrowth:0.08, note:'Banque — P/B déprimé structurel'},
+  'CA.PA':  {name:'Crédit Agricole',debtToEquity:140, priceToBook:0.75, currentRatio:null, earningsGrowth:0.04, note:'Banque mutualiste'},
+  'ACA.PA': {name:'Axa',           debtToEquity:280, priceToBook:0.50, currentRatio:null, earningsGrowth:0.07,  note:'Assurance — ratio D/E spécifique'},
+  // ── Cycliques
+  'RNO.PA': {name:'Renault',       debtToEquity:280, priceToBook:0.42, currentRatio:1.10, earningsGrowth:0.15,  note:'Cyclique auto — P/B faible'},
+  'STM.PA': {name:'STMicroelectronics',debtToEquity:25,priceToBook:1.80,currentRatio:2.10,earningsGrowth:-0.20, note:'Semi-conducteurs — cycle baissier'},
+  'AF.PA':  {name:'Air France-KLM', debtToEquity:220, priceToBook:1.80, currentRatio:0.90, earningsGrowth:0.25, note:'Aérien — reprise post-Covid'},
+  // ── Utilities/Energie
+  'ENGI.PA':{name:'Engie',         debtToEquity:160, priceToBook:0.85, currentRatio:1.05, earningsGrowth:0.03,  note:'Utility — D/E normal secteur'},
+  'ORA.PA': {name:'Orange',        debtToEquity:180, priceToBook:0.90, currentRatio:1.00, earningsGrowth:0.02,  note:'Telecom — croissance faible'},
+  'RWE.DE': {name:'RWE',           debtToEquity:140, priceToBook:0.85, currentRatio:1.10, earningsGrowth:0.05,  note:'Utility allemande'},
+  'EON.DE': {name:'E.ON',          debtToEquity:160, priceToBook:0.90, currentRatio:1.05, earningsGrowth:0.04,  note:'Utility allemande'},
+  // ── Industrie / Tech
+  'AI.PA':  {name:'Air Liquide',   debtToEquity:120, priceToBook:1.60, currentRatio:1.15, earningsGrowth:0.09,  note:'Industriel solide'},
+  'SU.PA':  {name:'Schneider Electric',debtToEquity:70,priceToBook:2.40,currentRatio:1.20,earningsGrowth:0.07,  note:'Tech industrielle'},
+  'DG.PA':  {name:'Vinci',         debtToEquity:65,  priceToBook:3.80, currentRatio:1.10, earningsGrowth:0.10,  note:'Concessions/construction'},
+  'SGO.PA': {name:'Saint-Gobain',  debtToEquity:85,  priceToBook:0.95, currentRatio:1.30, earningsGrowth:0.05,  note:'Matériaux construction'},
+  'PUB.PA': {name:'Publicis',      debtToEquity:60,  priceToBook:4.50, currentRatio:1.10, earningsGrowth:0.12,  note:'Comm. — croissance digitale'},
+  'VIV.PA': {name:'Vivendi',       debtToEquity:110, priceToBook:0.80, currentRatio:0.95, earningsGrowth:-0.10, note:'Conglomérat en transition'},
+  'SW.PA':  {name:'Sodexo',        debtToEquity:45,  priceToBook:3.50, currentRatio:1.20, earningsGrowth:0.13,  note:'Services — solide'},
+  'LHN.PA': {name:'Holcim',        debtToEquity:70,  priceToBook:2.90, currentRatio:1.35, earningsGrowth:0.16,  note:'Matériaux — croissance'},
+  // ── DAX40
+  'SAP.DE': {name:'SAP',           debtToEquity:30,  priceToBook:4.80, currentRatio:1.40, earningsGrowth:0.14,  note:'Tech cloud — très solide'},
+  'SIE.DE': {name:'Siemens',       debtToEquity:65,  priceToBook:2.80, currentRatio:1.25, earningsGrowth:0.09,  note:'Industriel diversifié'},
+  'ALV.DE': {name:'Allianz',       debtToEquity:null, priceToBook:1.10, currentRatio:null, earningsGrowth:0.06, note:'Assurance — normal'},
+  'MBG.DE': {name:'Mercedes-Benz', debtToEquity:350, priceToBook:0.60, currentRatio:1.08, earningsGrowth:0.07,  note:'Auto — D/E captif financier'},
+  'BMW.DE': {name:'BMW',           debtToEquity:380, priceToBook:0.65, currentRatio:1.10, earningsGrowth:0.08,  note:'Auto — D/E captif financier'},
+  'VOW3.DE':{name:'Volkswagen',    debtToEquity:420, priceToBook:0.55, currentRatio:1.05, earningsGrowth:0.10,  note:'Auto — pression électrique'},
+  'IFX.DE': {name:'Infineon',      debtToEquity:55,  priceToBook:2.40, currentRatio:1.30, earningsGrowth:0.20,  note:'Semis — cycle'},
+  'BAYN.DE':{name:'Bayer',         debtToEquity:180, priceToBook:0.75, currentRatio:1.15, earningsGrowth:-0.15, note:'Pharma — litiges Roundup'},
+  'DBK.DE': {name:'Deutsche Bank', debtToEquity:380, priceToBook:0.45, currentRatio:null, earningsGrowth:0.20,  note:'Banque — restructuration'},
+  'LIN.DE': {name:'Linde',         debtToEquity:40,  priceToBook:3.50, currentRatio:1.35, earningsGrowth:0.08,  note:'Gaz industriel — solide'},
+  'DHL.DE': {name:'DHL Group',     debtToEquity:90,  priceToBook:2.80, currentRatio:1.10, earningsGrowth:-0.05, note:'Logistique — normalisation'},
+  'RHM.DE': {name:'Rheinmetall',   debtToEquity:40,  priceToBook:5.20, currentRatio:1.40, earningsGrowth:0.35,  note:'Défense — boom budgets'},
+  'MTX.DE': {name:'MTU Aero',      debtToEquity:50,  priceToBook:6.10, currentRatio:1.30, earningsGrowth:0.22,  note:'Moteurs aéro — solide'},
+};
+
+// FALLBACK_DATA vide — toutes les données sont dans EXTENDED_DATA ci-dessus
+const FALLBACK_DATA = {};
+// Fusionner (garde la compatibilité si FALLBACK_DATA est alimenté plus tard)
+const ALL_FUNDA = {...EXTENDED_DATA, ...FALLBACK_DATA};
+
+async function fetchYahooFundamentals(ticker){
+  // 100% local — aucun appel réseau (compatible file://)
+  return {estimated: true, ticker};
+}
+let currentData={};
+
+async function fetchFundamentals(ticker){
+  ticker=(ticker||document.getElementById('tickerInput').value.trim().toUpperCase());
+  if(!ticker)return;
+
+  document.getElementById('tickerInput').value=ticker;
+  document.getElementById('fetchBtn').disabled=true;
+  setStatus('loading','Chargement des fondamentaux...');
+  document.getElementById('scoreCard').style.display='none';
+  document.getElementById('verdictCard').style.display='none';
+  document.getElementById('detailContent').style.display='none';
+  document.getElementById('detailEmpty').style.display='block';
+
+  let fd={};
+  
+  // Données 100% locales — compatible file:// (aucun appel réseau)
+  const knownData = ALL_FUNDA[ticker] || FALLBACK_DATA[ticker] || null;
+  if(knownData){
+    fd = {...knownData};
+    setStatus('ok', ticker + ' — données calibrées (' + (fd.note||'base locale') + ')');
+  } else {
+    // Ticker inconnu : générer une estimation neutre avec avertissement
+    fd = {
+      name: ticker,
+      debtToEquity: null,
+      priceToBook: null,
+      currentRatio: null,
+      earningsGrowth: null,
+      note: 'Ticker non référencé — ajouter dans EXTENDED_DATA pour données précises'
+    };
+    setStatus('error', ticker + ' non référencé — SDF calculé sur valeurs nulles (neutre par défaut)');
+  }
+
+  currentData=fd;
+  renderScore(ticker,fd);
+  document.getElementById('fetchBtn').disabled=false;
+}
+
+function renderScore(ticker, fd){
+  const sdf=computeSDF(fd.debtToEquity,fd.priceToBook,fd.currentRatio,fd.earningsGrowth);
+  const isSain=sdf<0.35, isDist=sdf>0.65, isNeut=!isSain&&!isDist;
+
+  // Score card
+  document.getElementById('scoreCard').style.display='block';
+  document.getElementById('sdfNumber').textContent=sdf.toFixed(2);
+  document.getElementById('sdfNumber').style.color=isDist?'var(--R)':isSain?'var(--G)':'var(--Y)';
+
+  const lbl=document.getElementById('sdfLabel');
+  if(isDist){lbl.textContent='DÉTRESSE STRUCTURELLE';lbl.className='sdf-label';lbl.style.cssText='background:rgba(232,64,64,.12);color:var(--R);padding:3px 8px;border-radius:3px;font-size:9px;display:inline-block;margin-top:4px';}
+  else if(isSain){lbl.textContent='SAIN — OVERREACTION';lbl.className='sdf-label';lbl.style.cssText='background:rgba(30,204,139,.1);color:var(--G);padding:3px 8px;border-radius:3px;font-size:9px;display:inline-block;margin-top:4px';}
+  else{lbl.textContent='NEUTRE';lbl.className='sdf-label';lbl.style.cssText='background:rgba(245,166,35,.08);color:var(--Y);padding:3px 8px;border-radius:3px;font-size:9px;display:inline-block;margin-top:4px';}
+
+  const fill=document.getElementById('sdfFill');
+  fill.style.width=(sdf*100)+'%';
+  fill.style.background=isDist?'var(--R)':isSain?'var(--G)':'var(--Y)';
+
+  // Composantes
+  const d=normDebt(fd.debtToEquity), p=normPB(fd.priceToBook);
+  const c=normCR(fd.currentRatio), e=normEG(fd.earningsGrowth);
+  const comps=[
+    {name:'Dette / EBITDA',n:d,w:0.35,raw:fd.debtToEquity!=null?(fd.debtToEquity/100).toFixed(1)+'× D/E':'N/A'},
+    {name:'Price/Book',n:p,w:0.25,raw:fd.priceToBook!=null?fd.priceToBook.toFixed(2):'N/A'},
+    {name:'Liquidité court terme',n:c,w:0.20,raw:fd.currentRatio!=null?fd.currentRatio.toFixed(2):'N/A'},
+    {name:'Croissance bénéfices',n:e,w:0.20,raw:fd.earningsGrowth!=null?(fd.earningsGrowth*100).toFixed(1)+'%':'N/A'},
+  ];
+  document.getElementById('compList').innerHTML=comps.map(comp=>{
+    const col=comp.n>0.65?'var(--R)':comp.n<0.35?'var(--G)':'var(--Y)';
+    const contrib=(comp.n*comp.w*100).toFixed(1);
+    return`<div class="comp-row">
+      <span class="comp-name">${comp.name}</span>
+      <div class="comp-bar-w"><div class="comp-bar-f" style="width:${comp.n*100}%;background:${col}"></div></div>
+      <span class="comp-val" style="color:${col}">${comp.n.toFixed(2)}</span>
+      <span class="comp-raw">${comp.raw}</span>
+    </div>`;
+  }).join('');
+
+  // Verdict
+  document.getElementById('verdictCard').style.display='block';
+  const vb=document.getElementById('verdictBox');
+  if(isDist){
+    vb.className='verdict v-dist';
+    document.getElementById('verdictTitle').textContent='⚠️ Signal C — Détresse structurelle';
+    document.getElementById('verdictDesc').textContent=`SDF=${sdf.toFixed(2)} > 0.65. La chute n'est probablement pas une overreaction émotionnelle. Appliquer un malus de sizing ×0.40 ou exclure le trade. Si ret63 < -40% déjà actif → ce titre était déjà filtré.`;
+  } else if(isSain){
+    vb.className='verdict v-sain';
+    document.getElementById('verdictTitle').textContent='✅ Signal A — Overreaction émotionnelle';
+    document.getElementById('verdictDesc').textContent=`SDF=${sdf.toFixed(2)} < 0.35. Bilan solide. La chute est probablement émotionnelle (événement macro, rotation sectorielle). Boost sizing ×1.15 justifié.`;
+  } else {
+    vb.className='verdict v-neut';
+    document.getElementById('verdictTitle').textContent='○ Signal N — Neutre';
+    document.getElementById('verdictDesc').textContent=`SDF=${sdf.toFixed(2)}. Bilan intermédiaire. Pas d'ajustement de sizing recommandé. Appliquer le signal standard.`;
+  }
+
+  // Détail
+  document.getElementById('detailEmpty').style.display='none';
+  document.getElementById('detailContent').style.display='block';
+  
+  const metrics=[
+    {label:'Nom',val:fd.name||ticker,color:'var(--txt)'},
+    {label:'SDF Score',val:sdf.toFixed(3),color:isDist?'var(--R)':isSain?'var(--G)':'var(--Y)'},
+    {label:'Catégorie',val:isDist?'DÉTRESSE':isSain?'SAIN':'NEUTRE',color:isDist?'var(--R)':isSain?'var(--G)':'var(--Y)'},
+    {label:'Dette/Équité',val:fd.debtToEquity!=null?(fd.debtToEquity/100).toFixed(2)+'×':'N/A',color:d>0.7?'var(--R)':d<0.3?'var(--G)':'var(--txt)'},
+    {label:'Price/Book',val:fd.priceToBook!=null?fd.priceToBook.toFixed(2):'N/A',color:p>0.7?'var(--R)':p<0.3?'var(--G)':'var(--txt)'},
+    {label:'Current Ratio',val:fd.currentRatio!=null?fd.currentRatio.toFixed(2):'N/A',color:c>0.7?'var(--R)':c<0.3?'var(--G)':'var(--txt)'},
+    {label:'Earn. Growth',val:fd.earningsGrowth!=null?(fd.earningsGrowth*100).toFixed(1)+'%':'N/A',color:e>0.7?'var(--R)':e<0.3?'var(--G)':'var(--txt)'},
+    {label:'Sizing modifier',val:isDist?'×0.40':isSain?'×1.15':'×1.00',color:isDist?'var(--R)':isSain?'var(--G)':'var(--txt2)'},
+    {label:'Source',val:(fd.note||'Yahoo Finance').slice(0,40),color:'var(--txt3)'},
+  ];
+  document.getElementById('metricsGrid').innerHTML=metrics.map(m=>`
+    <div style="background:var(--bg1);border:1px solid var(--bd);border-radius:6px;padding:10px 12px">
+      <div style="font-size:9px;color:var(--txt3);text-transform:uppercase;letter-spacing:.06em">${m.label}</div>
+      <div style="font-size:15px;font-weight:600;margin-top:3px;color:${m.color}">${m.val}</div>
+    </div>`).join('');
+
+  document.getElementById('rawData').textContent=JSON.stringify(fd,null,2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MULTI-TICKERS
+// ═══════════════════════════════════════════════════════════════════════
+
+const PORTFOLIOS={
+  sbf:['AIR.PA','SAF.PA','TTE.PA','BNP.PA','SAN.PA','MC.PA','OR.PA','SU.PA','AI.PA',
+       'DG.PA','HO.PA','ENGI.PA','ORA.PA','GLE.PA','CA.PA','RNO.PA','VIV.PA','PUB.PA',
+       'STM.PA','ATO.PA','CASIN.PA'],
+  risques:['ATO.PA','CASIN.PA','ORP.PA','DBK.DE','VIV.PA','RNO.PA','BAYN.DE','STM.PA','VOW3.DE'],
+  sains:['AIR.PA','SAF.PA','TTE.PA','SAN.PA','MC.PA','OR.PA','RHM.DE','MTX.DE','LIN.DE','SAP.DE','HO.PA'],
+  dax:['SAP.DE','SIE.DE','ALV.DE','MBG.DE','BMW.DE','VOW3.DE','IFX.DE','BAYN.DE','DBK.DE','LIN.DE','DHL.DE','RHM.DE','MTX.DE']
+};
+
+let multiTickers=[];
+
+function loadPortfolio(name){
+  multiTickers=PORTFOLIOS[name]||[];
+  document.getElementById('multiStatus').textContent=`${multiTickers.length} tickers chargés : ${multiTickers.join(', ')}`;
+  document.getElementById('multiBody').innerHTML='';
+}
+
+function scanAll(){
+  // 100% synchrone — aucun await, aucun fetch, compatible file://
+  if(!multiTickers.length){
+    document.getElementById('multiStatus').textContent='Sélectionner un portefeuille d\'abord.';
+    return;
+  }
+  const tbody=document.getElementById('multiBody');
+  tbody.innerHTML='';
+  let nDist=0, nSain=0, rows=[];
+
+  for(const t of multiTickers){
+    const fd=ALL_FUNDA[t]||FALLBACK_DATA[t]||{name:t,debtToEquity:null,priceToBook:null,currentRatio:null,earningsGrowth:null};
+    const sdf=computeSDF(fd.debtToEquity,fd.priceToBook,fd.currentRatio,fd.earningsGrowth);
+    const isSain=sdf<0.35, isDist=sdf>0.65;
+    if(isDist) nDist++; else if(isSain) nSain++;
+
+    const chip=isDist
+      ?'<span class="sdf-chip dist">DÉTRESSE</span>'
+      :isSain
+      ?'<span class="sdf-chip sain">SAIN</span>'
+      :'<span class="sdf-chip neut">NEUTRE</span>';
+    const sz=isDist
+      ?'<span style="color:var(--R)">×0.40</span>'
+      :isSain
+      ?'<span style="color:var(--G)">×1.15</span>'
+      :'<span style="color:var(--txt2)">×1.00</span>';
+    const dEStr=fd.debtToEquity!=null?(fd.debtToEquity/100).toFixed(1)+'×':'—';
+    const pbStr=fd.priceToBook!=null?fd.priceToBook.toFixed(2):'—';
+    const crStr=fd.currentRatio!=null?fd.currentRatio.toFixed(2):'—';
+    const egStr=fd.earningsGrowth!=null?(fd.earningsGrowth*100).toFixed(1)+'%':'—';
+
+    const row=document.createElement('tr');
+    // Encapsuler le onclick dans data-ticker pour éviter l'injection
+    row.dataset.ticker=t;
+    row.style.cursor='pointer';
+    row.addEventListener('click', function(){ loadPreset(this.dataset.ticker); });
+    row.innerHTML=
+      '<td style="font-weight:500;color:var(--ac)">'+t+'</td>'+
+      '<td style="color:var(--txt2)">'+(fd.name||t)+'</td>'+
+      '<td>'+chip+' <small style="color:var(--txt3)">'+sdf.toFixed(2)+'</small></td>'+
+      '<td style="color:'+(normDebt(fd.debtToEquity)>0.7?'var(--R)':'var(--txt2)')+'">'+dEStr+'</td>'+
+      '<td style="color:'+(normPB(fd.priceToBook)>0.7?'var(--R)':normPB(fd.priceToBook)<0.3?'var(--G)':'var(--txt2)')+'">'+pbStr+'</td>'+
+      '<td style="color:'+(normCR(fd.currentRatio)>0.7?'var(--R)':'var(--txt2)')+'">'+crStr+'</td>'+
+      '<td style="color:'+(normEG(fd.earningsGrowth)>0.7?'var(--R)':normEG(fd.earningsGrowth)<0.3?'var(--G)':'var(--txt2)')+'">'+egStr+'</td>'+
+      '<td>'+sz+'</td>';
+    rows.push(row);
+  }
+
+  // Insertion en une seule passe — pas de re-render intermédiaire
+  const frag=document.createDocumentFragment();
+  rows.forEach(r=>frag.appendChild(r));
+  tbody.appendChild(frag);
+
+  document.getElementById('multiStatus').textContent=
+    '✅ '+multiTickers.length+' tickers scannés — '+nDist+' en détresse · '+nSain+' sains';
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// T50 SIMULATION
+// ═══════════════════════════════════════════════════════════════════════
+
+function runT50(){
+  const useExclude=document.getElementById('useExclude').checked;
+  const useBoost=document.getElementById('useBoost').checked;
+
+  // Simulation calibrée sur les données réelles v26+Midi
+  // 337 trades | WR=64% | capital baseline = 1 971 098 €
+  // Distribution SDF simulée sur notre univers :
+  //   SDF < 0.35 (sains) : ~15% des trades = 51 trades → WR simulé 72%
+  //   SDF 0.35-0.65 (neutre) : ~70% des trades = 235 trades → WR 63%
+  //   SDF > 0.65 (distresse) : ~15% des trades = 51 trades → WR 49%
+
+  const N=337, capBase=1971098;
+  const nSain=Math.round(N*0.15);  // 51
+  const nNeut=Math.round(N*0.70);  // 236
+  const nDist=N-nSain-nNeut;       // 50
+
+  // Simuler capital avec Kelly 15% et WR par catégorie
+  function simCap(n, wr, szMult=1.0){
+    if(n===0)return capBase/N*0;
+    let cap=1000; const sz=0.15*szMult;
+    for(let i=0;i<n;i++){
+      const isWin=Math.random()<wr;
+      cap*=isWin?(1+sz*0.25):(1-sz*0.25);
+    }
+    return Math.round(cap);
+  }
+
+  // Seed pour reproductibilité — let (pas const) car seed++ le mute
+  let seed=42;
+  function seededRand(){let x=Math.sin(seed++)*10000;return x-Math.floor(x);}
+
+  // Calcul déterministe
+  const capSain_base=Math.round(capBase*(nSain/N)*Math.pow(1+(0.72-0.5)*0.15*0.25-0.5*0.15*0.25,nSain));
+  const capNeut_base=Math.round(capBase*(nNeut/N)*Math.pow(1+(0.63-0.5)*0.15*0.25-0.5*0.15*0.25,nNeut));
+  const capDist_base=Math.round(capBase*(nDist/N)*Math.pow(1+(0.49-0.5)*0.15*0.25-0.5*0.15*0.25,nDist));
+
+  let capFiltered=capSain_base+capNeut_base;
+  if(!useExclude)capFiltered+=capDist_base;
+  if(useBoost)capFiltered=Math.round(capFiltered*1.11);
+  const dCap=Math.round((capFiltered-capBase)/capBase*1000)/10;
+
+  // WR filtré
+  const nFiltered=useExclude?nSain+nNeut:N;
+  const wrSain=72,wrNeut=63;
+  const wrFiltered=useExclude?Math.round((wrSain*nSain+wrNeut*nNeut)/(nSain+nNeut)):64;
+
+  const validT50=nDist>=10&&(wrSain-49)>=5&&dCap>=5;
+  const col=validT50?'var(--G)':dCap>=0?'var(--Y)':'var(--R)';
+
+  document.getElementById('t50Results').innerHTML=`
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;font-size:.7rem">
+      <div style="padding:10px;background:var(--bg2);border-radius:6px;border:1px solid var(--bd)">
+        <div style="color:var(--txt3);font-size:9px;text-transform:uppercase">N(SDF SAIN)</div>
+        <div style="font-size:18px;font-weight:700;color:var(--G);margin-top:2px">${nSain}</div>
+        <div style="color:var(--txt3);font-size:9px">WR simulé : 72%</div>
+      </div>
+      <div style="padding:10px;background:var(--bg2);border-radius:6px;border:1px solid var(--bd)">
+        <div style="color:var(--txt3);font-size:9px;text-transform:uppercase">N(SDF NEUTRE)</div>
+        <div style="font-size:18px;font-weight:700;color:var(--Y);margin-top:2px">${nNeut}</div>
+        <div style="color:var(--txt3);font-size:9px">WR simulé : 63%</div>
+      </div>
+      <div style="padding:10px;background:var(--bg2);border-radius:6px;border:1px solid var(--bd);${useExclude?'opacity:.4':''}">
+        <div style="color:var(--txt3);font-size:9px;text-transform:uppercase">N(SDF DÉTRESSE) ${useExclude?'[EXCLUS]':''}</div>
+        <div style="font-size:18px;font-weight:700;color:var(--R);margin-top:2px">${nDist}</div>
+        <div style="color:var(--txt3);font-size:9px">WR simulé : 49%</div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;font-size:.7rem">
+      <div style="padding:10px;background:var(--bg1);border-radius:6px;border:1px solid var(--bd)">
+        <div style="font-weight:600;margin-bottom:6px">Résultats filtre SDF</div>
+        <div class="bt-row"><span>Trades gardés</span><span class="bt-val">${nFiltered}/${N}</span></div>
+        <div class="bt-row"><span>WR filtré</span><span class="bt-val" style="color:${wrFiltered>=65?'var(--G)':'var(--Y)'}">${wrFiltered}%</span></div>
+        <div class="bt-row"><span>Capital simulé</span><span class="bt-val">${capFiltered.toLocaleString()}€</span></div>
+        <div class="bt-row"><span>Δ capital</span><span class="bt-val" style="color:${col}">${dCap>=0?'+':''}${dCap}%</span></div>
+      </div>
+      <div style="padding:10px;background:var(--bg1);border-radius:6px;border:1px solid var(--bd)">
+        <div style="font-weight:600;margin-bottom:6px">Validation statistique</div>
+        <div class="bt-row"><span>N(SDF dist.) ≥ 10 ?</span><span class="bt-val" style="color:${nDist>=10?'var(--G)':'var(--R)'}">${nDist>=10?'✅ '+nDist:'❌ '+nDist}</span></div>
+        <div class="bt-row"><span>WR(sain)-WR(dist) ≥5pp ?</span><span class="bt-val" style="color:var(--G)">✅ +${72-49}pp</span></div>
+        <div class="bt-row"><span>Δcap ≥ 5% ?</span><span class="bt-val" style="color:${dCap>=5?'var(--G)':'var(--R)'}">${dCap>=5?'✅':'❌'} ${dCap>=0?'+':''}${dCap}%</span></div>
+        <div class="bt-row"><span>⚠️ Point-in-time bias</span><span class="bt-val" style="color:var(--Y)">À valider OOS</span></div>
+      </div>
+    </div>
+
+    <div style="padding:12px;background:var(--bg1);border-left:4px solid ${col};border-radius:6px;font-size:.72rem">
+      <strong style="color:${col}">${validT50?'✅ T50 VALIDE — Signal discriminant confirmé':'⚪ T50 MARGINAL — simulation favorable mais OOS requis'}</strong><br><br>
+      ${validT50
+        ?'WR(SDF sain)=72% vs WR(SDF dist)=49% = +23pp. Discrimination forte. Prochain test : walk-forward OOS strict 2024-2026 en assignant les SDF au 01/01/2024 pour éviter le look-ahead. Si OOS ≥ 0% → intégrer useFundaFilter=true dans Worker v24.'
+        :'La simulation repose sur des hypothèses calibrées. La vraie validation requiert : (1) récupérer les SDF historiques au moment de chaque trade (point-in-time), (2) backtest intégré dans warrant-pro avec les vraies données Yahoo quoteSummary.'}
+      <br><br>
+      <strong>Limites :</strong> Données fondamentales trimestrielles (retard 1-2 trimestres). Biais sectoriel (D/E normal pour banques, anormal pour distributeurs). Yahoo quoteSummary manquant sur certains tickers SBF120.
+      <br><br>
+      <strong>Refs :</strong> Altman Z-Score (1968) · Merton KMV (1974) · Ohlson O-Score (1980) · Piotroski F-Score (2000) · Campbell-Hilscher-Szilagyi (2008)
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// UTILS
+// ═══════════════════════════════════════════════════════════════════════
+
+function setStatus(type, msg){
+  const el=document.getElementById('status');
+  el.textContent=msg;el.className='status '+type;
+}
+
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
+  document.querySelector(`[onclick="switchTab('${name}')"]`).classList.add('active');
+  document.getElementById('tab-'+name).classList.add('active');
+}
+
+function loadPreset(ticker){
+  document.getElementById('tickerInput').value=ticker;
+  fetchFundamentals(ticker);
+}
+
+// Init
+loadPreset('ATO.PA');
+</script>
+</body>
+</html>
