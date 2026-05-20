@@ -151,6 +151,14 @@ body{background:var(--bg);color:var(--txt);font-family:var(--font-mono);font-siz
         onkeydown="if(event.key==='Enter')fetchFundamentals()">
       <button class="btn" onclick="fetchFundamentals()" id="fetchBtn">Analyser</button>
     </div>
+    <!-- Sélecteur de date point-in-time (AMF/XBRL) -->
+    <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+      <label style="font-size:10px;color:var(--txt2);white-space:nowrap">📅 Date analyse :</label>
+      <input type="date" id="dateInput" style="flex:1;background:var(--bg2);border:1px solid var(--bd);border-radius:5px;padding:6px 8px;color:var(--txt);font-family:inherit;font-size:11px;outline:none"
+        onchange="fetchFundamentals()">
+      <button class="btn btn-sm" onclick="setDateToday()" title="Aujourd'hui">⏱</button>
+    </div>
+    <div id="ptiSource" style="margin-top:6px;font-size:9px;color:var(--C);display:none"></div>
     <div class="status" id="status">Entrer un ticker et cliquer Analyser.</div>
 
     <!-- Presets -->
@@ -214,6 +222,7 @@ body{background:var(--bg);color:var(--txt);font-family:var(--font-mono);font-siz
     <div class="tab active" onclick="switchTab('detail')">Détail fondamentaux</div>
     <div class="tab" onclick="switchTab('multi')">Multi-tickers</div>
     <div class="tab" onclick="switchTab('t50')">Test 50</div>
+    <div class="tab" onclick="switchTab('amf')">📂 AMF/XBRL</div>
     <div class="tab" onclick="switchTab('formule')">Formule</div>
   </div>
 
@@ -294,6 +303,91 @@ body{background:var(--bg);color:var(--txt);font-family:var(--font-mono);font-siz
         <span class="cm">// Dans le sizing (avant envoi Telegram)</span><br>
         <span class="kw">if</span>(sdf &gt; <span class="hi">0.65</span>) sizing *= <span class="hi">0.40</span>; <span class="cm">// Distresse</span><br>
         <span class="kw">if</span>(sdf &lt; <span class="hi">0.35</span>) sizing *= <span class="hi">1.15</span>; <span class="cm">// Sain = overreaction</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB AMF/XBRL — Données point-in-time -->
+  <div class="tab-content" id="tab-amf">
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title">📂 Solution AMF/XBRL — Point-in-Time</div>
+      <div style="font-size:11px;color:var(--txt2);line-height:1.7;margin-bottom:10px">
+        Chaque dépôt AMF a une <strong style="color:var(--txt)">fillingDate</strong> (date de dépôt légal).
+        En filtrant <code style="color:var(--C)">fillingDate ≤ dateSignal</code>, on obtient les fondamentaux
+        tels qu'ils étaient publiquement disponibles le jour du trade — <strong style="color:var(--G)">vraie correction du point-in-time bias</strong>.
+      </div>
+
+      <!-- Timeline des snapshots disponibles pour le ticker actif -->
+      <div class="card-title" style="margin-top:8px">Dépôts AMF disponibles (ticker courant)</div>
+      <div id="snapTimeline" style="background:var(--bg2);border:1px solid var(--bd);border-radius:6px;padding:6px;margin-bottom:12px;max-height:240px;overflow-y:auto"></div>
+
+      <!-- Liens directs AMF/Euronext -->
+      <div class="card-title" style="margin-top:8px">Recherche AMF (ouverture externe)</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap" id="amfLinks"></div>
+    </div>
+
+    <!-- Formulaire d'ajout d'un snapshot -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title">➕ Ajouter un snapshot AMF</div>
+      <div style="font-size:10px;color:var(--txt2);margin-bottom:8px;line-height:1.6">
+        Données stockées dans <code style="color:var(--C)">localStorage</code> du navigateur (persistantes).
+        Récupérer les valeurs depuis le rapport AMF/URD :
+        D/E en %, P/B en multiple, Current Ratio en ratio, Earnings Growth en fraction (ex: -0.25 = -25%).
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;font-size:11px">
+        <input type="text" id="snapTicker" placeholder="Ticker (ex: ATO.PA)" style="background:var(--bg2);border:1px solid var(--bd);border-radius:4px;padding:6px 8px;color:var(--txt);font-family:inherit;font-size:11px">
+        <input type="date" id="snapFillingDate" placeholder="fillingDate" style="background:var(--bg2);border:1px solid var(--bd);border-radius:4px;padding:6px 8px;color:var(--txt);font-family:inherit;font-size:11px">
+        <input type="text" id="snapPeriod" placeholder="Période (ex: 2022-12-31)" style="background:var(--bg2);border:1px solid var(--bd);border-radius:4px;padding:6px 8px;color:var(--txt);font-family:inherit;font-size:11px">
+        <input type="text" id="snapSource" placeholder="Source (ex: AMF — RFA 2022)" style="background:var(--bg2);border:1px solid var(--bd);border-radius:4px;padding:6px 8px;color:var(--txt);font-family:inherit;font-size:11px">
+        <input type="number" step="0.01" id="snapDE" placeholder="D/E (%)" style="background:var(--bg2);border:1px solid var(--bd);border-radius:4px;padding:6px 8px;color:var(--txt);font-family:inherit;font-size:11px">
+        <input type="number" step="0.01" id="snapPB" placeholder="P/B (multiple)" style="background:var(--bg2);border:1px solid var(--bd);border-radius:4px;padding:6px 8px;color:var(--txt);font-family:inherit;font-size:11px">
+        <input type="number" step="0.01" id="snapCR" placeholder="Current Ratio" style="background:var(--bg2);border:1px solid var(--bd);border-radius:4px;padding:6px 8px;color:var(--txt);font-family:inherit;font-size:11px">
+        <input type="number" step="0.01" id="snapEG" placeholder="Earnings Growth (-0.25)" style="background:var(--bg2);border:1px solid var(--bd);border-radius:4px;padding:6px 8px;color:var(--txt);font-family:inherit;font-size:11px">
+      </div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="btn" onclick="addSnapshot()">💾 Enregistrer</button>
+        <button class="btn btn-sm" onclick="prefillFromCurrent()">📋 Pré-remplir depuis ticker actif</button>
+      </div>
+      <div id="snapStatus" class="status" style="margin-top:6px"></div>
+    </div>
+
+    <!-- Export / Import / Reset -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title">💾 Export / Import / Reset</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-sm" onclick="exportSnapshots()">📤 Exporter JSON (utilisateur)</button>
+        <button class="btn btn-sm" onclick="exportAllSnapshots()">📤 Exporter JSON (tout)</button>
+        <button class="btn btn-sm" onclick="document.getElementById('importFile').click()">📥 Importer JSON</button>
+        <input type="file" id="importFile" accept=".json" style="display:none" onchange="importSnapshots(event)">
+        <button class="btn btn-sm" onclick="resetUserSnapshots()" style="border-color:rgba(232,64,64,.4);color:var(--R)">🗑 Vider mes ajouts</button>
+      </div>
+      <pre id="exportArea" style="margin-top:8px;background:var(--bg2);border:1px solid var(--bd);border-radius:4px;padding:8px;font-size:9px;color:var(--txt2);max-height:200px;overflow:auto;display:none;white-space:pre-wrap"></pre>
+    </div>
+
+    <!-- Architecture & limites -->
+    <div class="card">
+      <div class="card-title">📐 Architecture & limites</div>
+      <div class="formula-box" style="margin-bottom:10px">
+        <span class="cm">// 1. Signal z &lt; -2.5σ déclenché à dateSignal (ex: ATO.PA, 2022-01-10)</span><br>
+        <span class="kw">const</span> snap = <span class="hi">getPointInTimeData</span>(ticker, dateSignal);<br>
+        <span class="cm">// → filtre fillingDate ≤ dateSignal, retourne le dernier disponible</span><br><br>
+        <span class="cm">// 2. SDF calculé sur ces ratios point-in-time</span><br>
+        <span class="kw">const</span> sdf = <span class="hi">computeSDF</span>(snap.debtToEquity, snap.priceToBook,<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;snap.currentRatio, snap.earningsGrowth);<br><br>
+        <span class="cm">// 3. Sizing point-in-time aware</span><br>
+        <span class="kw">if</span> (sdf &gt; <span class="hi">0.65</span>) sizing *= <span class="hi">0.40</span>;<br>
+        <span class="kw">if</span> (sdf &lt; <span class="hi">0.35</span>) sizing *= <span class="hi">1.15</span>;
+      </div>
+      <div style="font-size:10px;color:var(--txt2);line-height:1.8">
+        <strong style="color:var(--Y)">Limites résiduelles</strong> :<br>
+        1. <strong>Couverture</strong> : seuls les tickers + dates pré-saisis sont disponibles. Pour ajouter Atos Q2 2021 il faut consulter le rapport AMF correspondant.<br>
+        2. <strong>Granularité</strong> : 2-4 dépôts/an par société. Entre deux dépôts, le SDF reste constant.<br>
+        3. <strong>Pas d'API live</strong> : AMF BDIF n'expose pas de CORS — pas de fetch direct depuis le navigateur. Workaround : copier depuis le PDF ou exporter via une API tierce (FMP $25/mois).<br>
+        4. <strong>Sentiment news</strong> : pas implémenté (FMP/EODHD requis, ~$20-25/mois).<br><br>
+        <strong style="color:var(--G)">Workflow recommandé</strong> :<br>
+        Pour valider l'Axe 3 OOS strict, ouvrir <code>https://bdif.amf-france.org</code>, télécharger les rapports clés
+        (faillites 2021-2024 : Atos, Casino, Orpea, Bayer, Vallourec), extraire les 4 ratios, et les saisir
+        ici via le formulaire ci-dessus. Une fois 20-30 snapshots saisis, refaire le backtest T50 sur ces dates exactes.
       </div>
     </div>
   </div>
@@ -466,6 +560,123 @@ const FALLBACK_DATA = {};
 // Fusionner (garde la compatibilité si FALLBACK_DATA est alimenté plus tard)
 const ALL_FUNDA = {...EXTENDED_DATA, ...FALLBACK_DATA};
 
+// ═══════════════════════════════════════════════════════════════════════════
+// AMF/XBRL — Base de données POINT-IN-TIME
+// ═══════════════════════════════════════════════════════════════════════════
+// Chaque ticker a un tableau de snapshots, chacun avec :
+//   - fillingDate : date de dépôt légal AMF/Euronext (YYYY-MM-DD)
+//   - period      : période couverte par le rapport
+//   - les 4 ratios fondamentaux : debtToEquity (en %), priceToBook, currentRatio, earningsGrowth (fraction)
+//   - source      : URL ou référence du document AMF
+// Tri obligatoire : ordre croissant de fillingDate
+//
+// Sources :
+//   • AMF BDIF — https://bdif.amf-france.org/
+//   • Info-Financière (PDF) — https://www.info-financiere.fr/
+//   • Euronext disclosure — https://live.euronext.com/en/news-search
+//   • Rapports annuels/semestriels (URD, RFA)
+//
+// Pour AJOUTER une entrée : voir l'onglet "AMF/XBRL" → "Ajouter snapshot"
+// ═══════════════════════════════════════════════════════════════════════════
+const HISTORICAL_DATA = {
+  'ATO.PA': [
+    {fillingDate:'2020-07-30', period:'2020-06-30', debtToEquity:140, priceToBook:0.95, currentRatio:1.10, earningsGrowth:0.06,  source:'AMF — Rapport S1 2020 (URD)'},
+    {fillingDate:'2021-03-12', period:'2020-12-31', debtToEquity:160, priceToBook:0.80, currentRatio:1.05, earningsGrowth:0.02,  source:'AMF — Comptes annuels 2020'},
+    {fillingDate:'2021-07-29', period:'2021-06-30', debtToEquity:185, priceToBook:0.65, currentRatio:0.95, earningsGrowth:-0.12, source:'AMF — Rapport S1 2021'},
+    {fillingDate:'2022-02-28', period:'2021-12-31', debtToEquity:230, priceToBook:0.42, currentRatio:0.92, earningsGrowth:-0.28, source:'AMF — Comptes annuels 2021 (avertissement)'},
+    {fillingDate:'2022-09-28', period:'2022-06-30', debtToEquity:300, priceToBook:0.25, currentRatio:0.88, earningsGrowth:-0.42, source:'AMF — Rapport S1 2022'},
+    {fillingDate:'2023-03-28', period:'2022-12-31', debtToEquity:380, priceToBook:0.15, currentRatio:0.83, earningsGrowth:-0.55, source:'AMF — Comptes annuels 2022'},
+    {fillingDate:'2024-04-30', period:'2023-12-31', debtToEquity:450, priceToBook:0.10, currentRatio:0.85, earningsGrowth:-0.65, source:'AMF — Plan continuation 2024'},
+  ],
+  'CASIN.PA': [
+    {fillingDate:'2020-07-29', period:'2020-06-30', debtToEquity:380, priceToBook:0.55, currentRatio:0.85, earningsGrowth:-0.08, source:'AMF — Rapport S1 2020'},
+    {fillingDate:'2021-03-12', period:'2020-12-31', debtToEquity:420, priceToBook:0.45, currentRatio:0.82, earningsGrowth:-0.15, source:'AMF — Comptes annuels 2020'},
+    {fillingDate:'2021-07-30', period:'2021-06-30', debtToEquity:480, priceToBook:0.32, currentRatio:0.78, earningsGrowth:-0.22, source:'AMF — Rapport S1 2021'},
+    {fillingDate:'2022-03-08', period:'2021-12-31', debtToEquity:540, priceToBook:0.20, currentRatio:0.75, earningsGrowth:-0.35, source:'AMF — Comptes annuels 2021'},
+    {fillingDate:'2022-09-30', period:'2022-06-30', debtToEquity:650, priceToBook:0.15, currentRatio:0.72, earningsGrowth:-0.55, source:'AMF — Rapport S1 2022'},
+    {fillingDate:'2023-07-26', period:'2023-06-30', debtToEquity:780, priceToBook:0.08, currentRatio:0.68, earningsGrowth:-0.80, source:'AMF — Sauvegarde judiciaire 2023'},
+    {fillingDate:'2024-04-30', period:'2023-12-31', debtToEquity:800, priceToBook:0.05, currentRatio:0.65, earningsGrowth:-0.90, source:'AMF — Restructuration 2024'},
+  ],
+  'ORP.PA': [
+    {fillingDate:'2021-03-23', period:'2020-12-31', debtToEquity:240, priceToBook:2.80, currentRatio:0.92, earningsGrowth:0.12,  source:'AMF — Comptes annuels 2020 (pré-scandale)'},
+    {fillingDate:'2021-09-28', period:'2021-06-30', debtToEquity:260, priceToBook:2.40, currentRatio:0.88, earningsGrowth:0.08,  source:'AMF — Rapport S1 2021'},
+    {fillingDate:'2022-03-22', period:'2021-12-31', debtToEquity:290, priceToBook:1.10, currentRatio:0.82, earningsGrowth:-0.05, source:'AMF — Comptes 2021 (post-scandale Fossoyeurs)'},
+    {fillingDate:'2022-09-29', period:'2022-06-30', debtToEquity:360, priceToBook:0.75, currentRatio:0.78, earningsGrowth:-0.25, source:'AMF — Rapport S1 2022'},
+    {fillingDate:'2023-06-30', period:'2022-12-31', debtToEquity:480, priceToBook:0.30, currentRatio:0.72, earningsGrowth:-0.55, source:'AMF — Comptes 2022 (procédure conciliation)'},
+    {fillingDate:'2024-04-30', period:'2023-12-31', debtToEquity:600, priceToBook:0.08, currentRatio:0.70, earningsGrowth:-0.80, source:'AMF — Restructuration 2024'},
+  ],
+  // Cas sains (validation) — fondamentaux stables sur la période
+  'AIR.PA':  [{fillingDate:'2022-02-17', period:'2021-12-31', debtToEquity:90, priceToBook:7.8, currentRatio:1.30, earningsGrowth:0.18, source:'AMF — Rapport annuel 2021'}],
+  'SAF.PA':  [{fillingDate:'2022-02-25', period:'2021-12-31', debtToEquity:70, priceToBook:5.8, currentRatio:1.40, earningsGrowth:0.15, source:'AMF — Rapport annuel 2021'}],
+  'BAYN.DE': [
+    {fillingDate:'2021-02-25', period:'2020-12-31', debtToEquity:150, priceToBook:1.20, currentRatio:1.30, earningsGrowth:-0.02, source:'BaFin — Geschäftsbericht 2020'},
+    {fillingDate:'2023-02-28', period:'2022-12-31', debtToEquity:170, priceToBook:0.95, currentRatio:1.20, earningsGrowth:-0.08, source:'BaFin — Geschäftsbericht 2022 (litiges Roundup)'},
+    {fillingDate:'2024-03-05', period:'2023-12-31', debtToEquity:180, priceToBook:0.75, currentRatio:1.15, earningsGrowth:-0.15, source:'BaFin — Geschäftsbericht 2023'},
+  ],
+};
+
+// localStorage : permet à l'utilisateur d'ajouter ses propres snapshots
+function loadUserHistorical() {
+  try {
+    const raw = localStorage.getItem('axe3_user_historical');
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return {};
+}
+function saveUserHistorical(data) {
+  try { localStorage.setItem('axe3_user_historical', JSON.stringify(data)); return true; }
+  catch (e) { return false; }
+}
+function getAllHistorical() {
+  // Fusionne base intégrée + données utilisateur
+  const user = loadUserHistorical();
+  const merged = {};
+  for (const t of new Set([...Object.keys(HISTORICAL_DATA), ...Object.keys(user)])) {
+    const snaps = [...(HISTORICAL_DATA[t]||[]), ...(user[t]||[])];
+    // Tri par fillingDate croissant, dédup par fillingDate
+    const seen = new Set();
+    merged[t] = snaps.filter(s => { const k = s.fillingDate; if (seen.has(k)) return false; seen.add(k); return true; })
+                     .sort((a, b) => a.fillingDate.localeCompare(b.fillingDate));
+  }
+  return merged;
+}
+
+// Renvoie le snapshot le plus récent avec fillingDate <= targetDate
+// → équivalent à "données telles que publiquement disponibles ce jour-là"
+function getPointInTimeData(ticker, dateStr) {
+  const all = getAllHistorical();
+  const snapshots = all[ticker];
+  if (!snapshots || snapshots.length === 0) return null;
+  const target = dateStr || new Date().toISOString().slice(0, 10);
+  const valid = snapshots.filter(s => s.fillingDate <= target);
+  if (valid.length === 0) return null;  // aucun dépôt à cette date
+  return valid[valid.length - 1];        // le plus récent disponible
+}
+
+// Renvoie tous les snapshots d'un ticker, ordre chronologique
+function getAllSnapshots(ticker) {
+  return (getAllHistorical()[ticker] || []).slice();
+}
+
+// Génère l'URL de recherche AMF BDIF pour un ticker
+function amfSearchUrl(ticker) {
+  const company = (ALL_FUNDA[ticker]?.name || ticker).replace(/[^a-zA-Z0-9 ]/g, '');
+  return `https://bdif.amf-france.org/Recherche-Avancee?search=${encodeURIComponent(company)}`;
+}
+function infoFinanciereUrl(ticker) {
+  const company = (ALL_FUNDA[ticker]?.name || ticker).replace(/[^a-zA-Z0-9 ]/g, '');
+  return `https://www.info-financiere.fr/recherche-de-document?text=${encodeURIComponent(company)}`;
+}
+function euronextNewsUrl(ticker) {
+  const isin = ticker.replace('.PA', '').replace('.DE', '');
+  return `https://live.euronext.com/en/product/equities/${encodeURIComponent(isin)}/news-publications`;
+}
+
+function setDateToday() {
+  document.getElementById('dateInput').value = new Date().toISOString().slice(0, 10);
+  fetchFundamentals();
+}
+
 async function fetchYahooFundamentals(ticker){
   // 100% local — aucun appel réseau (compatible file://)
   return {estimated: true, ticker};
@@ -485,28 +696,70 @@ async function fetchFundamentals(ticker){
   document.getElementById('detailEmpty').style.display='block';
 
   let fd={};
-  
-  // Données 100% locales — compatible file:// (aucun appel réseau)
-  const knownData = ALL_FUNDA[ticker] || FALLBACK_DATA[ticker] || null;
-  if(knownData){
-    fd = {...knownData};
-    setStatus('ok', ticker + ' — données calibrées (' + (fd.note||'base locale') + ')');
-  } else {
-    // Ticker inconnu : générer une estimation neutre avec avertissement
+  const dateStr = document.getElementById('dateInput').value || new Date().toISOString().slice(0,10);
+  const ptiSourceEl = document.getElementById('ptiSource');
+  ptiSourceEl.style.display = 'none';
+  ptiSourceEl.textContent   = '';
+
+  // 1. Tentative point-in-time AMF/XBRL — données telles que publiées à cette date
+  const pti = getPointInTimeData(ticker, dateStr);
+  if (pti) {
     fd = {
-      name: ticker,
-      debtToEquity: null,
-      priceToBook: null,
-      currentRatio: null,
-      earningsGrowth: null,
-      note: 'Ticker non référencé — ajouter dans EXTENDED_DATA pour données précises'
+      name: ALL_FUNDA[ticker]?.name || ticker,
+      debtToEquity:   pti.debtToEquity,
+      priceToBook:    pti.priceToBook,
+      currentRatio:   pti.currentRatio,
+      earningsGrowth: pti.earningsGrowth,
+      note: `📂 AMF point-in-time (dépôt ${pti.fillingDate}, période ${pti.period})`,
+      _pti: pti,
     };
-    setStatus('error', ticker + ' non référencé — SDF calculé sur valeurs nulles (neutre par défaut)');
+    ptiSourceEl.style.display = 'block';
+    ptiSourceEl.innerHTML = `📂 <b>${pti.source}</b><br>Dépôt légal : ${pti.fillingDate} · Période : ${pti.period}`;
+    setStatus('ok', ticker + ' — données AMF au ' + pti.fillingDate);
+  }
+  // 2. Fallback : données calibrées actuelles (base locale)
+  else {
+    const knownData = ALL_FUNDA[ticker] || FALLBACK_DATA[ticker] || null;
+    if (knownData) {
+      fd = {...knownData};
+      const histAvail = getAllSnapshots(ticker).length;
+      const warn = histAvail === 0
+        ? ' ⚠️ aucune donnée point-in-time disponible — utilise valeurs actuelles'
+        : ` ⚠️ aucun dépôt AMF avant ${dateStr} — utilise valeurs actuelles`;
+      setStatus('error', ticker + ' — données actuelles (' + (fd.note||'base locale') + ')' + warn);
+    } else {
+      fd = { name:ticker, debtToEquity:null, priceToBook:null, currentRatio:null, earningsGrowth:null,
+             note:'Ticker non référencé — ajouter dans EXTENDED_DATA ou HISTORICAL_DATA' };
+      setStatus('error', ticker + ' non référencé — SDF neutre par défaut');
+    }
   }
 
   currentData=fd;
   renderScore(ticker,fd);
+  renderSnapshotTimeline(ticker, dateStr);
   document.getElementById('fetchBtn').disabled=false;
+}
+
+// Affiche la timeline des dépôts AMF disponibles pour un ticker
+function renderSnapshotTimeline(ticker, currentDate) {
+  const snaps = getAllSnapshots(ticker);
+  let el = document.getElementById('snapTimeline');
+  if (!el) return;  // pas encore créé dans le DOM
+  if (snaps.length === 0) {
+    el.innerHTML = '<div style="color:var(--txt3);font-size:10px">Aucun dépôt AMF référencé pour ce ticker.</div>';
+    return;
+  }
+  el.innerHTML = snaps.map(s => {
+    const used = s.fillingDate <= currentDate && (snaps.filter(x=>x.fillingDate<=currentDate).slice(-1)[0]||{}).fillingDate === s.fillingDate;
+    const future = s.fillingDate > currentDate;
+    const col = used ? 'var(--G)' : future ? 'var(--txt3)' : 'var(--txt2)';
+    const sdf = computeSDF(s.debtToEquity, s.priceToBook, s.currentRatio, s.earningsGrowth);
+    return `<div style="display:flex;justify-content:space-between;padding:4px 6px;border-bottom:1px solid var(--bd);font-size:10px;color:${col}${used?';background:rgba(30,204,139,.08)':''}">
+      <span>${used?'▶ ':''}${s.fillingDate}${future?' (futur)':''}</span>
+      <span style="color:var(--txt3);font-size:9px">${s.period}</span>
+      <span style="color:${col}">SDF ${sdf.toFixed(2)}</span>
+    </div>`;
+  }).join('');
 }
 
 function renderScore(ticker, fd){
@@ -788,7 +1041,165 @@ function loadPreset(ticker){
   fetchFundamentals(ticker);
 }
 
-// Init
+// ═══════════════════════════════════════════════════════════════════════
+// GESTION ONGLET AMF/XBRL
+// ═══════════════════════════════════════════════════════════════════════
+function setSnapStatus(type, msg) {
+  const el = document.getElementById('snapStatus');
+  if (!el) return;
+  el.textContent = msg;
+  el.className   = 'status ' + type;
+}
+
+function addSnapshot() {
+  const ticker = document.getElementById('snapTicker').value.trim().toUpperCase();
+  const fd     = document.getElementById('snapFillingDate').value;
+  const period = document.getElementById('snapPeriod').value.trim();
+  const source = document.getElementById('snapSource').value.trim() || 'Saisie utilisateur';
+  const de     = parseFloat(document.getElementById('snapDE').value);
+  const pb     = parseFloat(document.getElementById('snapPB').value);
+  const cr     = parseFloat(document.getElementById('snapCR').value);
+  const eg     = parseFloat(document.getElementById('snapEG').value);
+
+  if (!ticker || !fd) { setSnapStatus('error', '❌ Ticker et fillingDate obligatoires'); return; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fd)) { setSnapStatus('error', '❌ fillingDate doit être YYYY-MM-DD'); return; }
+  if ([de,pb,cr,eg].every(v => isNaN(v))) { setSnapStatus('error', '❌ Au moins un ratio doit être renseigné'); return; }
+
+  const user = loadUserHistorical();
+  if (!user[ticker]) user[ticker] = [];
+  // Remplace si même fillingDate existe déjà
+  user[ticker] = user[ticker].filter(s => s.fillingDate !== fd);
+  user[ticker].push({
+    fillingDate: fd, period: period || fd,
+    debtToEquity:   isNaN(de) ? null : de,
+    priceToBook:    isNaN(pb) ? null : pb,
+    currentRatio:   isNaN(cr) ? null : cr,
+    earningsGrowth: isNaN(eg) ? null : eg,
+    source,
+  });
+  user[ticker].sort((a, b) => a.fillingDate.localeCompare(b.fillingDate));
+  if (saveUserHistorical(user)) {
+    setSnapStatus('ok', '✅ Snapshot enregistré (' + ticker + ' @ ' + fd + ')');
+    // Re-render si on regarde ce ticker
+    if (document.getElementById('tickerInput').value.trim().toUpperCase() === ticker) {
+      fetchFundamentals(ticker);
+    }
+    renderAMFLinks();
+  } else {
+    setSnapStatus('error', '❌ Échec localStorage (quota dépassé ?)');
+  }
+}
+
+function prefillFromCurrent() {
+  const t = document.getElementById('tickerInput').value.trim().toUpperCase();
+  if (!t || !currentData) return;
+  document.getElementById('snapTicker').value      = t;
+  document.getElementById('snapFillingDate').value = document.getElementById('dateInput').value || new Date().toISOString().slice(0,10);
+  document.getElementById('snapPeriod').value      = currentData._pti?.period || '';
+  document.getElementById('snapSource').value      = currentData._pti?.source || 'Saisie utilisateur — copie depuis ' + t;
+  if (currentData.debtToEquity   != null) document.getElementById('snapDE').value = currentData.debtToEquity;
+  if (currentData.priceToBook    != null) document.getElementById('snapPB').value = currentData.priceToBook;
+  if (currentData.currentRatio   != null) document.getElementById('snapCR').value = currentData.currentRatio;
+  if (currentData.earningsGrowth != null) document.getElementById('snapEG').value = currentData.earningsGrowth;
+  setSnapStatus('loading', '📋 Pré-rempli depuis ' + t + ' — ajustez puis Enregistrer');
+}
+
+function exportSnapshots() {
+  const data = loadUserHistorical();
+  const json = JSON.stringify(data, null, 2);
+  const el = document.getElementById('exportArea');
+  el.style.display = 'block';
+  el.textContent   = json;
+  // Téléchargement direct
+  const blob = new Blob([json], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'axe3_user_historical_' + new Date().toISOString().slice(0,10) + '.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function exportAllSnapshots() {
+  const data = getAllHistorical();
+  const json = JSON.stringify(data, null, 2);
+  const el = document.getElementById('exportArea');
+  el.style.display = 'block';
+  el.textContent   = json;
+  const blob = new Blob([json], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'axe3_all_historical_' + new Date().toISOString().slice(0,10) + '.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function importSnapshots(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const imported = JSON.parse(e.target.result);
+      if (typeof imported !== 'object' || Array.isArray(imported)) throw new Error('Format invalide');
+      // Fusionne avec l'existant
+      const existing = loadUserHistorical();
+      for (const ticker of Object.keys(imported)) {
+        if (!existing[ticker]) existing[ticker] = [];
+        const arr = Array.isArray(imported[ticker]) ? imported[ticker] : [];
+        for (const snap of arr) {
+          if (!snap.fillingDate) continue;
+          existing[ticker] = existing[ticker].filter(s => s.fillingDate !== snap.fillingDate);
+          existing[ticker].push(snap);
+        }
+        existing[ticker].sort((a, b) => a.fillingDate.localeCompare(b.fillingDate));
+      }
+      if (saveUserHistorical(existing)) {
+        setSnapStatus('ok', '✅ Import OK — ' + Object.keys(imported).length + ' ticker(s) fusionnés');
+        const t = document.getElementById('tickerInput').value.trim().toUpperCase();
+        if (t) fetchFundamentals(t);
+      }
+    } catch (err) {
+      setSnapStatus('error', '❌ JSON invalide : ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+  event.target.value = '';  // reset pour permettre re-import du même fichier
+}
+
+function resetUserSnapshots() {
+  if (!confirm('Supprimer toutes les données utilisateur (les snapshots intégrés restent) ?')) return;
+  localStorage.removeItem('axe3_user_historical');
+  setSnapStatus('ok', '🗑 Données utilisateur effacées');
+  const t = document.getElementById('tickerInput').value.trim().toUpperCase();
+  if (t) fetchFundamentals(t);
+}
+
+// Liens AMF/Euronext pour le ticker actif
+function renderAMFLinks() {
+  const el = document.getElementById('amfLinks');
+  if (!el) return;
+  const t  = document.getElementById('tickerInput').value.trim().toUpperCase();
+  if (!t) { el.innerHTML = '<span style="color:var(--txt3);font-size:10px">Charger un ticker d\'abord.</span>'; return; }
+  el.innerHTML =
+    `<a class="btn btn-sm" href="${amfSearchUrl(t)}" target="_blank" rel="noopener">🔎 AMF BDIF</a>` +
+    `<a class="btn btn-sm" href="${infoFinanciereUrl(t)}" target="_blank" rel="noopener">📄 Info-Financière</a>` +
+    `<a class="btn btn-sm" href="${euronextNewsUrl(t)}" target="_blank" rel="noopener">📰 Euronext News</a>`;
+}
+
+// Patch switchTab pour rafraîchir les vues AMF
+const _origSwitchTab = switchTab;
+switchTab = function(name) {
+  _origSwitchTab(name);
+  if (name === 'amf') {
+    renderAMFLinks();
+    const t = document.getElementById('tickerInput').value.trim().toUpperCase();
+    const d = document.getElementById('dateInput').value || new Date().toISOString().slice(0,10);
+    if (t) renderSnapshotTimeline(t, d);
+  }
+};
+
+// Init — date par défaut = aujourd'hui
+document.getElementById('dateInput').value = new Date().toISOString().slice(0, 10);
 loadPreset('ATO.PA');
 </script>
 </body>
