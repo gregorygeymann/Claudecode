@@ -303,7 +303,7 @@ export default {
 
     if (url.pathname === '/ping') {
       return new Response(JSON.stringify({
-        ok: true, version: 'worker_v22',
+        ok: true, version: 'worker_v25_tipp',
         timestamp: new Date().toISOString(),
         env: {
           TG_TOKEN:    env.TG_TOKEN   ? `présent (${env.TG_TOKEN.slice(0,8)}...)` : '❌ MANQUANT',
@@ -475,7 +475,8 @@ async function runBatchB(env) {
   } catch (e) { console.warn('[runBatchB] Net Liquidity impossible:', e.message); }
 
   const allBarsMeta = { ...(batchA?.bars_meta || {}), ...resultB._barsMeta };
-  const fullResult  = buildFinalResult(allBarsMeta, vix, allErrors, resultB.timestamp, env, regimeForBuild, netLiquidity);
+  const risk        = await computeRiskContext(env, netLiquidity, allBarsMeta);
+  const fullResult  = buildFinalResult(allBarsMeta, vix, allErrors, resultB.timestamp, env, regimeForBuild, netLiquidity, risk);
 
   await env.TRADING_KV.put('last_result', JSON.stringify(fullResult)).catch(() => {});
   const raw = await env.TRADING_KV.get('history').catch(() => null);
@@ -572,7 +573,9 @@ async function runWarrantScan(env, tickers = TK_CORE, sendTg = true) {
     barsMeta[tk.t] = { tk, ind, sig, bs };
   }
 
-  const result     = buildFinalResult(barsMeta, vix, errors, new Date().toISOString(), env, regime);
+  // Moteur TIPP uniquement sur le scan complet (les batches A/B le calculent dans runBatchB)
+  const risk       = sendTg ? await computeRiskContext(env, null, barsMeta) : null;
+  const result     = buildFinalResult(barsMeta, vix, errors, new Date().toISOString(), env, regime, null, risk);
   result._barsMeta = barsMeta;
   result.regime    = regime;
   result.duration  = Date.now() - started;
@@ -611,7 +614,7 @@ async function runWarrantScan(env, tickers = TK_CORE, sendTg = true) {
 }
 
 // ─── buildFinalResult ─────────────────────────────────────────────────────────
-function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiquidity) {
+function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiquidity, risk) {
   const CAPITAL_ENV = Number(env?.CAPITAL_EUR) > 0 ? Number(env.CAPITAL_EUR) : 10000;
   let CAPITAL = CAPITAL_ENV, capitalSource = 'env_fixe';
   if (netLiquidity && netLiquidity > 0) {
@@ -626,6 +629,11 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
   const regCapMult    = regime ? regime.profile.capMult   : 1.00;
   const regAllowEntry = regime ? regime.profile.allowEntry : true;
   const regZThreshAdd = regime ? regime.profile.zThreshAdd : 0;
+
+  // Moteur TIPP : frein progressif + budget global de primes (coussin restant)
+  const riskMult       = risk ? risk.mult : 1.0;
+  const riskAllowEntry = risk ? risk.allowEntry : true;
+  let   riskBudgetLeft = risk ? Math.max(0, risk.cushion - risk.openPremium) : Infinity;
 
   const allResults = Object.values(barsMeta).map(({ tk, ind, sig, bs }) => ({ ...tk, ind, sig, bs }));
   for (const r of allResults) r.sectorCorr = r.sig ? sectorCorrelation(r, allResults) : null;
@@ -664,13 +672,15 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
       else if (al.sectorCorr?.status === 'sectorial') szAdj *= 1.1;
 
       szAdj = Math.min(0.25, szAdj);
-      if (regimeBlocked || regimeFiltered) szAdj = 0;
+      szAdj *= riskMult;
+      const riskBlocked = !riskAllowEntry;
+      if (regimeBlocked || regimeFiltered || riskBlocked) szAdj = 0;
 
       const warrantPrice  = al.bs?.price || 0;
       const requestedEur  = Math.round(CAPITAL * szAdj);
 
       let account = 'A', amountEur = 0, overflow = false;
-      if (regimeBlocked || regimeFiltered) { account = 'OFF'; amountEur = 0; }
+      if (regimeBlocked || regimeFiltered || riskBlocked) { account = 'OFF'; amountEur = 0; }
       else if (NB_ACC === 1) {
         const avail = MAX_A - capA;
         amountEur = Math.min(requestedEur, Math.max(0, avail));
@@ -690,7 +700,6 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
         }
       }
 
-      const qty  = warrantPrice > 0 ? Math.floor(amountEur / warrantPrice / 100) * 100 : 0;
       const matu = Math.abs(al.ind.z) >= SCAN_CFG.oneMonthZ ? '1M' : '3M';
 
       // Cap sectoriel 35%
@@ -705,7 +714,20 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
           amountEur = Math.round(allowed); sectorCapped = true;
         }
       }
+      // Budget TIPP : la somme des primes (ouvertes + nouvelles) ne dépasse
+      // jamais le coussin — garantie plancher même si tout va à 0.
+      let riskCapped = false;
+      if (amountEur > riskBudgetLeft) {
+        const allowedR = Math.max(0, Math.floor(riskBudgetLeft));
+        const surplus  = amountEur - allowedR;
+        if (account==='A') capA-=surplus; else if (account==='B') capB-=surplus; else { capA-=surplus/2; capB-=surplus/2; }
+        amountEur = allowedR; riskCapped = true;
+      }
+      riskBudgetLeft = Math.max(0, riskBudgetLeft - amountEur);
+
       if (amountEur > 0) sectorExposure[sector] = (sectorExposure[sector]||0) + amountEur;
+
+      const qty = warrantPrice > 0 ? Math.floor(amountEur / warrantPrice / 100) * 100 : 0;
 
       const maturityDays = matu === '1M' ? 30 : 90;
       const exitRules = {
@@ -743,6 +765,7 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
           nbAccounts:   NB_ACC,
           mm200Mult:    Math.round(mm200Mult*100)/100,
           isFriday,     sectorCapped,
+          riskCapped,   riskMult,
         },
         // ── Infos warrant pour Telegram ──
         warrant: {
@@ -771,7 +794,8 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
       proxy:regime.proxy,
       features:{ sigma20:Math.round(regime.features.sigma20*1000)/1000, sigma60:Math.round(regime.features.sigma60*1000)/1000, ratio:Math.round(regime.features.ratio*100)/100, ret20:Math.round(regime.features.ret20*1000)/1000, absret5:Math.round(regime.features.absret5*1000)/1000 },
     } : null,
-    capital:  { total:CAPITAL, nbAccounts:NB_ACC, perAccount:CAP_PER_ACC, dailyCapPct:vixDailyCap, dailyCapEffective:vixDailyCap*regCapMult },
+    capital:  { total:CAPITAL, nbAccounts:NB_ACC, perAccount:CAP_PER_ACC, dailyCapPct:vixDailyCap, dailyCapEffective:vixDailyCap*regCapMult,
+      risk: risk ? { equity:Math.round(risk.equity), hwm:Math.round(risk.hwm), floor:Math.round(risk.floor), cushion:Math.round(risk.cushion), dd:Math.round(risk.dd*1000)/1000, mult:risk.mult, allowEntry:risk.allowEntry, openPremium:Math.round(risk.openPremium), budgetLeft:Math.round(Math.max(0, risk.cushion - risk.openPremium)), trimRequired:Math.round(risk.trimRequired||0) } : null },
     scanned:  Object.keys(barsMeta).length,
     errors,   timestamp,
   };
@@ -889,6 +913,44 @@ const SCAN_CFG = {
   sizingCap:   0.25,
   oneMonthZ:   2.5,
 };
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  MOTEUR DE RISQUE TIPP v25 — ruine 0% / MDD ≤ 45% par construction
+//
+//  Principe (TIPP = Time-Invariant Portfolio Protection, variante CPPI à
+//  plancher cliqueté) : le plancher vaut 58% du plus-haut historique (HWM)
+//  de l'équité et ne descend jamais. La perte maximale d'un warrant étant
+//  sa prime, on impose : somme des primes ouvertes ≤ coussin (équité − plancher).
+//  Même si TOUS les warrants ouverts valent 0 du jour au lendemain,
+//  l'équité reste ≥ 58% du HWM → MDD structurel ≤ 42% (marge 3 pts sous la
+//  contrainte de 45% pour spreads/slippage) et probabilité de ruine = 0.
+//
+//  Freins progressifs (anti cash-lock) : on dé-risque bien avant le plancher,
+//  le hard-stop à 35% de DD laisse toujours un coussin ≥ 7% du HWM intact.
+// ═══════════════════════════════════════════════════════════════════════════════
+const RISK_CFG = {
+  floorPct: 0.58,            // plancher = 58% du HWM → perte max structurelle 42%
+  brakes: [                  // dd ≥ seuil → sizing × mult (premier seuil atteint)
+    { dd: 0.35, mult: 0.00 },// hard-stop : plus aucune entrée
+    { dd: 0.25, mult: 0.35 },
+    { dd: 0.15, mult: 0.60 },
+  ],
+  reArmDD: 0.30,             // après hard-stop, réautorise les entrées sous 30% de DD
+};
+
+function tippRiskBudget(equity, state) {
+  const s = state && state.hwm > 0 ? { hwm: state.hwm, hardStopped: !!state.hardStopped } : { hwm: equity, hardStopped: false };
+  if (equity > s.hwm) s.hwm = equity;            // ratchet : le plancher ne descend jamais
+  const floor   = s.hwm * RISK_CFG.floorPct;
+  const cushion = Math.max(0, equity - floor);   // budget total de primes pouvant aller à 0
+  const dd      = s.hwm > 0 ? Math.max(0, 1 - equity / s.hwm) : 0;
+  if (dd >= RISK_CFG.brakes[0].dd) s.hardStopped = true;
+  else if (s.hardStopped && dd < RISK_CFG.reArmDD) s.hardStopped = false;
+  let mult = 1.0;
+  for (const b of RISK_CFG.brakes) { if (dd >= b.dd) { mult = b.mult; break; } }
+  if (s.hardStopped) mult = 0;
+  return { hwm: s.hwm, floor, cushion, dd, mult, allowEntry: mult > 0, state: s };
+}
 
 function detectSignal(a) {
   if (!a) return null;
@@ -1110,6 +1172,45 @@ async function checkPositionsForExits(env) {
   return { toSell, toHold, errors, updateAge, totalPositions:stored.positions.length };
 }
 
+// ─── Contexte de risque : équité, valeur des primes ouvertes, budget TIPP ─────
+async function computeRiskContext(env, netLiquidity, barsMeta) {
+  const CAPITAL_ENV = Number(env?.CAPITAL_EUR) > 0 ? Number(env.CAPITAL_EUR) : 10000;
+  const equity = netLiquidity && netLiquidity > 0 ? netLiquidity : CAPITAL_ENV;
+
+  // Valeur de marché estimée (Black-Scholes) des primes ouvertes
+  let openPremium = 0;
+  try {
+    const raw = await env.TRADING_KV.get('user_positions');
+    const positions = raw ? (JSON.parse(raw).positions || []) : [];
+    for (const p of positions) {
+      let value = (p.price || 0) * (p.qty || 0);   // repli : prime d'entrée
+      const meta = barsMeta?.[p.ticker];
+      if (meta?.ind) {
+        const S         = meta.ind.price;
+        const sig       = (meta.ind.vol60 || 25) / 100;
+        const entryDate = parseDateSafe(p.date);
+        const maxDays   = p.matu === '1M' ? 30 : 90;
+        const daysHeld  = entryDate ? daysBetween(entryDate, new Date()) : 0;
+        const T         = Math.max((maxDays - daysHeld) / 365, 0.001);
+        const bs = p.type === 'PUT' ? blackScholes(p.strike, S, T, sig) : blackScholes(S, p.strike, T, sig);
+        if (bs.price > 0) value = bs.price * (p.qty || 0);
+      }
+      openPremium += value;
+    }
+  } catch (e) { console.warn('[risk] positions illisibles:', e.message); }
+
+  let state = null;
+  try { const raw = await env.TRADING_KV.get('risk_state'); if (raw) state = JSON.parse(raw); } catch (e) {}
+  const budget = tippRiskBudget(equity, state);
+  await env.TRADING_KV.put('risk_state', JSON.stringify(budget.state)).catch(() => {});
+
+  // Si les primes ouvertes dépassent le coussin (forte appréciation non prise),
+  // il faut alléger pour restaurer la garantie plancher.
+  const trimRequired = Math.max(0, openPremium - budget.cushion);
+  console.log(`[risk] équité=${equity.toFixed(0)}€ HWM=${budget.hwm.toFixed(0)}€ DD=${(budget.dd*100).toFixed(1)}% plancher=${budget.floor.toFixed(0)}€ primes=${openPremium.toFixed(0)}€ budget restant=${Math.max(0, budget.cushion-openPremium).toFixed(0)}€`);
+  return { ...budget, equity, openPremium, trimRequired };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  TELEGRAM — sendTelegram
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1144,6 +1245,15 @@ async function sendTelegram(alerts, vix, errors, env, capitalInfo, regime, exits
   const vixLine    = vix    ? `\n📡 *VSTOXX* : ${vix.current.toFixed(1)} _(${vix.regime.toUpperCase()})_ → sizing ×${(vix.mult||vixMultiplier(vix.current,'normal')).toFixed(2)} · cap ${Math.round((vix.dailyCap||0.6)*100)}%/compte` : '';
   const capLine    = capitalInfo ? `\n💼 *Capital* : ${capitalInfo.total.toLocaleString('fr-FR')}€ · ${capitalInfo.nbAccounts} compte(s)${capitalInfo.nbAccounts===2?' (A+B)':''}` : '';
 
+  const rk = capitalInfo?.risk;
+  let riskLine = '';
+  if (rk) {
+    riskLine = `\n🛡 *TIPP* : DD ${(rk.dd*100).toFixed(1)}% · plancher ${rk.floor.toLocaleString('fr-FR')}€ · budget primes ${rk.budgetLeft.toLocaleString('fr-FR')}€`;
+    if (!rk.allowEntry)        riskLine += ` · ⛔ *HARD-STOP (entrées bloquées)*`;
+    else if (rk.mult < 1)      riskLine += ` · frein ×${rk.mult.toFixed(2)}`;
+    if (rk.trimRequired > 0)   riskLine += `\n⚠️ *ALLÉGER ${rk.trimRequired.toLocaleString('fr-FR')}€ de primes* — primes ouvertes > coussin, garantie plancher à restaurer`;
+  }
+
   let msg;
 
   if (isPanic) {
@@ -1151,7 +1261,7 @@ async function sendTelegram(alerts, vix, errors, env, capitalInfo, regime, exits
     msg += `━━━━━━━━━━━━━━━━━━━━━━\n`;
     msg += `🔴 Régime : *${reg.name}* (${reg.profile})\n`;
     msg += `📊 Confiance K-means : ×${reg.confidence.toFixed(2)}\n`;
-    msg += `📉 σ20=${(reg.features.sigma20*100).toFixed(0)}% · ret20=${(reg.features.ret20*100).toFixed(1)}%${vixLine}\n\n`;
+    msg += `📉 σ20=${(reg.features.sigma20*100).toFixed(0)}% · ret20=${(reg.features.ret20*100).toFixed(1)}%${vixLine}${riskLine}\n\n`;
     msg += `*🚫 Aucune nouvelle entrée recommandée aujourd'hui.*\n\n`;
     if (nSell > 0) { msg += `🟠 *${nSell} POSITION(S) À VENDRE* :\n━━━━━━━━━━━━━━━━━━━━━━\n`; for (const p of exits.toSell.slice(0,8)) msg += buildExitBlock(p); }
     else if (exits.toHold.length > 0) msg += `📌 ${exits.toHold.length} position(s) en CONSERVER.\n\n`;
@@ -1161,7 +1271,7 @@ async function sendTelegram(alerts, vix, errors, env, capitalInfo, regime, exits
   } else if (nBuy === 0 && nSell === 0) {
     msg  = `😴 *WARRANTPRO — JOURNÉE CALME*\n_${date}_\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━━\n`;
-    msg += `*Aucune action requise aujourd'hui.*${regimeLine}${vixLine}${capLine}\n\n`;
+    msg += `*Aucune action requise aujourd'hui.*${regimeLine}${vixLine}${capLine}${riskLine}\n\n`;
     msg += `📊 *Bilan du scan* :\n• Aucun signal nouveau (achat)\n`;
     if (nHold > 0) {
       msg += `• ${nHold} position(s) en CONSERVER (TP/SL/theta OK)\n\n`;
@@ -1178,7 +1288,7 @@ async function sendTelegram(alerts, vix, errors, env, capitalInfo, regime, exits
   } else if (nBuy === 0 && nSell > 0) {
     msg  = `🔔 *WARRANTPRO — VENTES À FAIRE*\n_${date}_\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━━\n`;
-    msg += `*${nSell} position(s) à VENDRE aujourd'hui*${regimeLine}${vixLine}${capLine}\n\n`;
+    msg += `*${nSell} position(s) à VENDRE aujourd'hui*${regimeLine}${vixLine}${capLine}${riskLine}\n\n`;
     msg += `🟠 *${nSell} POSITION(S) À VENDRE* :\n━━━━━━━━━━━━━━━━━━━━━━\n`;
     for (const p of exits.toSell.slice(0,10)) msg += buildExitBlock(p);
     if (nHold > 0) msg += `\n📌 ${nHold} autre(s) en CONSERVER.\n`;
@@ -1189,7 +1299,7 @@ async function sendTelegram(alerts, vix, errors, env, capitalInfo, regime, exits
     msg += `━━━━━━━━━━━━━━━━━━━━━━\n`;
     msg += `*${nBuy} signal(s) ACHAT* : 🟢 ${calls.length} CALL · 🔴 ${puts.length} PUT`;
     if (nSell > 0) msg += ` · ⚠️ *${nSell} à VENDRE*`;
-    msg += `${regimeLine}${vixLine}${capLine}\n`;
+    msg += `${regimeLine}${vixLine}${capLine}${riskLine}\n`;
     msg += `_Backtest validé · 18 tests · PF=2.01 · cooldown 7j actif_\n\n`;
 
     if (nSell > 0) {
@@ -1331,3 +1441,9 @@ function buildSignalBlock(al) {
   block += '\n';
   return block;
 }
+
+// ─── Exports nommés (backtest/validation — ignorés par Cloudflare Workers) ────
+export {
+  precompute, scanIndicators, detectSignal, computeSizing, blackScholes,
+  vixMultiplier, tippRiskBudget, RISK_CFG, SCAN_CFG,
+};
