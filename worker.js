@@ -414,6 +414,59 @@ export default {
       return new Response(JSON.stringify(rows, null, 2), { headers: CORS });
     }
 
+    // ─── Calibration de fréquence sur données réelles ────────────────────────
+    // Mesure combien de signaux/mois chaque seuil zL aurait produits sur 1 an,
+    // choisit celui qui vise TARGET_SIGNALS_MONTH (défaut 5.5) et le stocke en
+    // KV (signal_tuning) — appliqué automatiquement aux scans suivants.
+    // Plan gratuit Cloudflare (50 subrequests max) : appeler ?batch=a PUIS ?batch=b.
+    if (url.pathname === '/calibrate') {
+      const batch  = url.searchParams.get('batch')?.toLowerCase();
+      const target = Number(env.TARGET_SIGNALS_MONTH) > 0 ? Number(env.TARGET_SIGNALS_MONTH) : 5.5;
+      const tks    = batch === 'a' ? TK_BATCH_A : batch === 'b' ? TK_BATCH_B : TK_CORE;
+      await getYahooSession(env);
+      const allBars = [], errors = [];
+      for (const tk of tks) {
+        try {
+          const b = await fetchBars(tk.t, '1y', '1d', env);
+          if (b.length > 70) allBars.push(b); else errors.push(tk.t);
+        } catch (e) { errors.push(tk.t); }
+        await sleep(80);
+      }
+      const grid = [];
+      for (let zL = SIGNAL_CFG.zLBounds[0]; zL <= SIGNAL_CFG.zLBounds[1] + 1e-9; zL += 0.1) grid.push(Math.round(zL * 100) / 100);
+      const counts = grid.map(zL => countSignalsPerMonth(allBars, zL));
+
+      if (batch === 'a') {
+        await env.TRADING_KV.put('calib_a', JSON.stringify({ grid, counts, scanned: allBars.length, ts: Date.now() }));
+        return new Response(JSON.stringify({ ok:true, step:'batch A stocké', scanned:allBars.length, next:'/calibrate?batch=b' }, null, 2), { headers: CORS });
+      }
+      let merged = counts, scanned = allBars.length;
+      if (batch === 'b') {
+        const rawA = await env.TRADING_KV.get('calib_a').catch(() => null);
+        if (!rawA) return new Response(JSON.stringify({ ok:false, error:"Lancer /calibrate?batch=a d'abord" }), { status:400, headers: CORS });
+        const A = JSON.parse(rawA);
+        merged = grid.map((_, i) => {
+          const total  = counts[i].total + A.counts[i].total;
+          const months = Math.max(counts[i].months, A.counts[i].months);
+          const perTier = {};
+          for (const k of ['H','M','L','PUT']) perTier[k] = (counts[i].perTier[k]||0) + (A.counts[i].perTier[k]||0);
+          return { perMonth: total / months, total, months, perTier };
+        });
+        scanned += A.scanned;
+      }
+      let best = 0;
+      for (let i = 1; i < grid.length; i++)
+        if (Math.abs(merged[i].perMonth - target) < Math.abs(merged[best].perMonth - target)) best = i;
+      const tuning = { zL: grid[best], perMonth: Math.round(merged[best].perMonth * 10) / 10, target, scanned, at: new Date().toISOString() };
+      await env.TRADING_KV.put('signal_tuning', JSON.stringify(tuning)).catch(() => {});
+      return new Response(JSON.stringify({
+        ok: true, tuning,
+        table: grid.map((zL, i) => ({ zL, perMonth: Math.round(merged[i].perMonth * 10) / 10, perTier: merged[i].perTier })),
+        errors,
+        note: 'zL appliqué automatiquement aux prochains scans (KV signal_tuning)',
+      }, null, 2), { headers: CORS });
+    }
+
     return new Response(JSON.stringify({ status:'ok', worker:'WarrantPro', batches:{ a:TK_BATCH_A.length, b:TK_BATCH_B.length } }), { headers: CORS });
   },
 };
@@ -564,11 +617,16 @@ async function runWarrantScan(env, tickers = TK_CORE, sendTg = true) {
     await sleep(100);
   }
 
+  // Seuil zL auto-calibré sur données réelles (voir /calibrate)
+  let tuning = null;
+  try { const r = await env.TRADING_KV.get('signal_tuning'); if (r) tuning = JSON.parse(r); } catch (e) {}
+  if (tuning) console.log(`[scan] tuning zL=${tuning.zL} (${tuning.perMonth} signaux/mois mesurés le ${tuning.at?.slice(0,10)})`);
+
   const barsMeta = {};
   for (const tk of tickers) {
     if (!bars[tk.t]) continue;
     const ind = scanIndicators(bars[tk.t]);
-    const sig = ind ? detectSignal(ind) : null;
+    const sig = ind ? detectSignal(ind, tuning) : null;
     const bs  = ind ? blackScholes(ind.price, ind.price, 90/365, ind.vol60/100) : null;
     barsMeta[tk.t] = { tk, ind, sig, bs };
   }
@@ -654,7 +712,9 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
     .map(al => {
       const isFlash = al.ind.z < -3.0 && al.ind.rsi < 20 && al.ind.sqFresh;
       let regimeBlocked = !regAllowEntry;
-      let regimeFiltered = !regimeBlocked && regZThreshAdd > 0 && Math.abs(al.ind.z) < (2.5 + regZThreshAdd);
+      // En STRESS, on ne bloque que le palier L — l'ancien filtre (|z| ≥ 3.0)
+      // supprimait quasi tous les signaux et expliquait ~1 signal/6 semaines.
+      let regimeFiltered = !regimeBlocked && regZThreshAdd > 0 && al.sig.conf === 'L';
 
       let szPct = computeSizing(al.ind.z, al.ind.rsi, al.ind.sq, al.ind.ret63, isFlash, al.s, vixMult);
       szPct *= regKellyMult;
@@ -777,12 +837,15 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
           riskCapped,   riskMult,
           deployMult:   Math.round(deployMult*100)/100,
         },
-        // ── Infos warrant pour Telegram ──
+        // ── Infos warrant pour Telegram (sélection réaliste) ──
         warrant: {
-          strike: Math.round(al.ind.price * 100) / 100,  // ATM = cours actuel
-          delta:  al.bs?.delta ?? null,
-          lever:  al.bs?.lever ?? null,
-          parity: 1,  // parité unitaire (modèle BS brut)
+          strike:     roundStrike(al.ind.price),         // grille cotée par les émetteurs
+          strikeAlt:  roundStrike(al.ind.price * (al.sig.dir === 'CALL' ? 1.05 : 0.95)), // strike voisin acceptable
+          deltaMin:   0.40, deltaMax: 0.60,              // fourchette à viser sur le warrant listé
+          delta:      al.bs?.delta ?? null,
+          lever:      al.bs?.lever ?? null,
+          matuListed: matu === '1M' ? '2 à 3 mois' : '3 à 5 mois',  // échéance LISTÉE à choisir
+          maxSpread:  0.03,                              // spread bid/ask max acceptable
         },
         sectorCorr: al.sectorCorr ? { status:al.sectorCorr.status, reason:al.sectorCorr.reason } : null,
         matu, isFlash,
@@ -962,11 +1025,31 @@ function tippRiskBudget(equity, state) {
   return { hwm: s.hwm, floor, cushion, dd, mult, allowEntry: mult > 0, state: s };
 }
 
-function detectSignal(a) {
+// ─── Signaux par paliers v26.1 ────────────────────────────────────────────────
+// L'ancien filtre (z<-2.0 ET RSI<30 ET squeeze ET |ret63|<15, durci à |z|≥3.0
+// en régime STRESS) produisait ~1 signal/6 semaines en réel. Les paliers
+// ci-dessous visent 5-6 signaux/mois sur l'univers ; la qualité est graduée
+// par le sizing (H > M > L), et le moteur TIPP borne le risque global.
+// Le seuil zL du palier L est auto-calibré sur données réelles via /calibrate.
+const SIGNAL_CFG = {
+  H:   { z: -2.5, rsi: 30, ret63: 15 },                  // extrême — squeeze non requis
+  M:   { z: -2.0, rsi: 35, ret63: 18 },                  // fort — squeeze OU vol gonflée
+  L:   { z: -1.6, rsi: 40, ret63: 18 },                  // léger — squeeze requis
+  PUT: { z:  2.5, rsi: 72, ret63: 18 },
+  zLBounds: [-2.2, -1.4],                                // bornes de l'auto-calibration
+};
+function detectSignal(a, tun) {
   if (!a) return null;
-  if (a.z < -2.5 && a.rsi < 25 && a.sq && Math.abs(a.ret63) < 15) return { dir:'CALL', conf:'H', reason:`Chute extrême ${a.z}σ · RSI ${a.rsi} · squeeze` };
-  if (a.z < -2.0 && a.rsi < 30 && a.sq && Math.abs(a.ret63) < 15) return { dir:'CALL', conf:'M', reason:`Chute forte ${a.z}σ · RSI ${a.rsi} · squeeze confirmé J+1` };
-  if (a.z >  3.0 && a.rsi > 75 && a.sq && Math.abs(a.ret63) < 15) return { dir:'PUT',  conf:'M', reason:`Hausse extrême ${a.z}σ · RSI ${a.rsi}` };
+  const c = SIGNAL_CFG;
+  if (a.z < c.H.z && a.rsi < c.H.rsi && Math.abs(a.ret63) < c.H.ret63)
+    return { dir:'CALL', conf:'H', reason:`Chute extrême ${a.z}σ · RSI ${a.rsi}` };
+  if (a.z < c.M.z && a.rsi < c.M.rsi && (a.sq || (a.ivRatio ?? 0) >= 1.25) && Math.abs(a.ret63) < c.M.ret63)
+    return { dir:'CALL', conf:'M', reason:`Chute forte ${a.z}σ · RSI ${a.rsi} · ${a.sq ? 'squeeze' : 'vol gonflée'}` };
+  const zL = Math.min(Math.max(tun?.zL ?? c.L.z, c.zLBounds[0]), c.zLBounds[1]);
+  if (a.z < zL && a.rsi < c.L.rsi && a.sq && Math.abs(a.ret63) < c.L.ret63)
+    return { dir:'CALL', conf:'L', reason:`Repli ${a.z}σ · RSI ${a.rsi} · squeeze` };
+  if (a.z > c.PUT.z && a.rsi > c.PUT.rsi && Math.abs(a.ret63) < c.PUT.ret63)
+    return { dir:'PUT', conf:'M', reason:`Hausse extrême ${a.z}σ · RSI ${a.rsi}` };
   return null;
 }
 
@@ -1016,6 +1099,59 @@ function blackScholes(S, K, T, sig) {
     delta: Math.round(delta*1000)/1000,
     lever: price > 0.001 ? Math.round(delta*S/price*10)/10 : 0,
   };
+}
+
+// ─── Calibration de fréquence sur données réelles ─────────────────────────────
+// Rejoue les conditions exactes de detectSignal sur chaque jour de l'historique
+// (mêmes formules que scanIndicators, en O(n) via precompute).
+function replaySignals(bars, tun) {
+  const ind = precompute(bars);
+  if (!ind) return [];
+  const out = [];
+  let lastSig = -99;
+  for (let d = 70; d < ind.n; d++) {
+    const vol60 = ind.v60[d];
+    if (vol60 < 0.01) continue;
+    const ret5 = (ind.c[d] - ind.c[d-5]) / ind.c[d-5];
+    const z    = Math.round(ret5 / (vol60 / Math.sqrt(252) * Math.sqrt(5)) * 100) / 100;
+    const rsi  = Math.round(ind.rsi[d] || 50);
+    let sq = false;
+    for (let k = 1; k <= 10; k++) {
+      const i2 = d - k;
+      if (i2 < 21) break;
+      if (ind.v21[i2] > 0.01 && ind.v5[i2] / ind.v21[i2] < 0.8) { sq = true; break; }
+    }
+    const ret63 = d >= 63 ? Math.round((ind.c[d] - ind.c[d-63]) / ind.c[d-63] * 1000) / 10 : 0;
+    let ivRatio = null;
+    if (ind.v5[d] > 0.005 && ind.v21[d] > 0.005) ivRatio = Math.round(ind.v5[d] / ind.v21[d] * 100) / 100;
+    const sig = detectSignal({ z, rsi, sq, ret63, ivRatio }, tun);
+    if (sig && d - lastSig >= 5) {           // dédup ~7 jours calendaires
+      out.push({ d, dir: sig.dir, conf: sig.conf });
+      lastSig = d;
+    }
+  }
+  return out;
+}
+
+// Compte les signaux/mois pour un seuil zL donné, sur un lot de bars
+function countSignalsPerMonth(allBars, zL) {
+  let total = 0, days = 0;
+  const perTier = { H:0, M:0, L:0, PUT:0 };
+  for (const bars of allBars) {
+    const sigs = replaySignals(bars, { zL });
+    total += sigs.length;
+    for (const s of sigs) perTier[s.dir === 'PUT' ? 'PUT' : s.conf]++;
+    days = Math.max(days, bars.length - 70);
+  }
+  const months = Math.max(1, days / 21);
+  return { perMonth: total / months, total, months: Math.round(months * 10) / 10, perTier };
+}
+
+// Arrondit le strike à la grille réellement cotée par les émetteurs —
+// un strike "155.20€" n'existe pas, "155€" ou "160€" oui.
+function roundStrike(S) {
+  const step = S < 10 ? 0.5 : S < 25 ? 1 : S < 50 ? 2.5 : S < 100 ? 5 : S < 250 ? 10 : S < 500 ? 20 : 50;
+  return Math.round(S / step) * step;
 }
 
 function recommendIssuer(ticker) {
@@ -1403,7 +1539,7 @@ function buildExitBlock(p) {
 function buildSignalBlock(al) {
   const isCall    = al.direction === 'CALL';
   const icon      = isCall ? '🟢' : '🔴';
-  const conf      = al.confidence === 'H' ? '★★★ Signal Fort' : '★★ Signal Modéré';
+  const conf      = al.confidence === 'H' ? '★★★ Signal Fort' : al.confidence === 'L' ? '★ Signal Léger' : '★★ Signal Modéré';
   const flash     = al.isFlash ? ' ⚡ *FLASH*' : '';
   const urgency   = al.isFlash
     ? '🔴 *URGENT — EXÉCUTER DANS LES 2H*'
@@ -1430,37 +1566,39 @@ function buildSignalBlock(al) {
   } catch (e) {}
 
   const wp     = al.sizing?.warrantPrice || 0;
-  const trailT = (al.exitRules?.trailTrigger || wp*1.20).toFixed(4);
   const keepPc = Math.round((al.exitRules?.trailKeep ?? 0.5)*100);
   const slU    = (al.exitRules?.slUnderlying || (al.price||0)*(isCall?0.95:1.05)).toFixed(2);
   const theta   = al.exitRules?.thetaCritical || '7 jours restants';
   const maxDays = al.exitRules?.maxHoldDays || 90;
 
-  // Infos warrant
-  const strike  = al.warrant?.strike ?? al.price ?? 0;
-  const delta   = al.warrant?.delta  != null ? al.warrant.delta.toFixed(3) : '~0.500';
-  const lever   = al.warrant?.lever  != null ? al.warrant.lever.toFixed(1) : '?';
-  const parity  = al.warrant?.parity ?? 1;
+  // Infos warrant — sélection sur le marché réel
+  const strike    = al.warrant?.strike    ?? roundStrike(al.price || 0);
+  const strikeAlt = al.warrant?.strikeAlt ?? null;
+  const dMin      = al.warrant?.deltaMin  ?? 0.40;
+  const dMax      = al.warrant?.deltaMax  ?? 0.60;
+  const matuL     = al.warrant?.matuListed || '2 à 3 mois';
+  const lever     = al.warrant?.lever != null ? al.warrant.lever.toFixed(1) : '5-8';
 
   let block = '';
   block += `${icon} *${al.name || al.ticker}* \`${al.ticker}\` — ${al.direction} ${al.matu || ''}${flash}\n`;
   block += `${conf} · ${corrIcon}\n`;
   block += `*${al.reason || ''}*\n\n`;
 
-  // ── Section ACHAT enrichie ──
-  block += `📥 *ACHAT*\n`;
-  block += `• Valeur actuelle  : \`${(al.price || 0).toFixed(2)}€\` _(${al.name || al.ticker})_\n`;
-  block += `• Strike           : \`${strike.toFixed(2)}€\` _(ATM)_\n`;
-  block += `• Prix warrant ${al.matu || ''} : \`${wp.toFixed(4)}€\`\n`;
-  block += `• Parité           : delta=${delta} · levier ×${lever} · ratio ${parity}:1\n`;
-  block += `• Émetteur         : *${typeof al.issuer === 'string' ? al.issuer : (al.issuer?.recommended || 'voir courtier')}*\n`;
+  // ── Section ACHAT : choisir un warrant réellement coté ──
+  block += `📥 *ACHAT — sélection du warrant coté*\n`;
+  block += `• Sous-jacent      : \`${(al.price || 0).toFixed(2)}€\` _(${al.name || al.ticker})_\n`;
+  block += `• Strike à viser   : \`${strike}€\`${strikeAlt != null && strikeAlt !== strike ? ` (sinon \`${strikeAlt}€\`)` : ''} — prendre le plus proche listé\n`;
+  block += `• Échéance listée  : *${matuL}* (jamais < 6 semaines : theta)\n`;
+  block += `• Critères         : delta ${dMin.toFixed(2)}–${dMax.toFixed(2)} · spread ≤ 3% · levier ~×${lever}\n`;
+  block += `• Émetteur         : *${typeof al.issuer === 'string' ? al.issuer : (al.issuer?.recommended || 'voir courtier')}* — sinon tout émetteur respectant les critères\n`;
   block += `• *Montant : ${(al.sizing?.amountEur || 0).toLocaleString('fr-FR')}€* (${al.sizing?.szPct || 0}% du capital, ${acctLbl})\n`;
-  block += `• Quantité estimée : ~${(al.sizing?.qty || 0).toLocaleString('fr-FR')} warrants${overflowWarn}\n`;
+  block += `  _La quantité dépend du prix coté et de la parité (10:1 ou 100:1) — investir le montant, pas un nombre de titres._${overflowWarn}\n`;
+  block += `• Réf. théorique BS (parité 1:1) : \`${wp.toFixed(4)}€\` — le coté sera ≈ ÷10 ou ÷100\n`;
   block += `• ${urgency}\n\n`;
 
   // ── Seuils de sortie ──
   block += `📤 *SEUILS DE SORTIE (v26 — stop suiveur)*\n`;
-  block += `• 🎯 Trail armé dès : \`${trailT}€\` (warrant +20%) → vendre si retombée sous entrée + ${keepPc}% du gain max\n`;
+  block += `• 🎯 Trail : dès *+20% sur votre prix d'achat réel*, vendre si retombée sous entrée + ${keepPc}% du gain max\n`;
   block += isCall
     ? `• ⛔ SL sous-jacent : \`${slU}€\` (-5%)\n`
     : `• ⛔ SL sous-jacent : \`${slU}€\` (+5%)\n`;
@@ -1484,5 +1622,6 @@ function buildSignalBlock(al) {
 // ─── Exports nommés (backtest/validation — ignorés par Cloudflare Workers) ────
 export {
   precompute, scanIndicators, detectSignal, computeSizing, blackScholes,
-  vixMultiplier, tippRiskBudget, RISK_CFG, SCAN_CFG, TRAIL_CFG,
+  vixMultiplier, tippRiskBudget, replaySignals, countSignalsPerMonth,
+  RISK_CFG, SCAN_CFG, TRAIL_CFG, SIGNAL_CFG,
 };

@@ -283,7 +283,7 @@ function simulate(seed, engineOn, strat) {
         if (cooldown[t] > d) continue;
         if (positions.some(p => p.t === t)) continue;
         const f = fast[t], zf = f.z[d];
-        const candMR   = zf < -1.8 || zf > 2.7;
+        const candMR   = zf < -1.35 || zf > 2.4;   // couvre les paliers H/M/L + PUT
         const nMomoOpen = positions.reduce((s, p) => s + (p.sleeve === 'MOMO' ? 1 : 0), 0);
         const candMomo = strat.momo && nMomoOpen < MOMO_CFG.maxOpen
           && f.ret126[d] > MOMO_CFG.ret126Min && f.ret63[d] > MOMO_CFG.ret63Min / 100
