@@ -303,7 +303,7 @@ export default {
 
     if (url.pathname === '/ping') {
       return new Response(JSON.stringify({
-        ok: true, version: 'worker_v25_tipp',
+        ok: true, version: 'worker_v26_tipp_trail',
         timestamp: new Date().toISOString(),
         env: {
           TG_TOKEN:    env.TG_TOKEN   ? `présent (${env.TG_TOKEN.slice(0,8)}...)` : '❌ MANQUANT',
@@ -672,6 +672,16 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
       else if (al.sectorCorr?.status === 'sectorial') szAdj *= 1.1;
 
       szAdj = Math.min(0.25, szAdj);
+
+      // DEPLOY v26 : déploie le coussin TIPP inutilisé, pondéré par la qualité
+      // du signal (validé : +13.9%/an moyen vs +5.5%, pire DD inchangé)
+      let deployMult = 1;
+      if (risk && risk.allowEntry && risk.dd < 0.15 && risk.cushion > 0) {
+        const boost = Math.min(0.5, 0.6 * Math.max(0, riskBudgetLeft / risk.cushion));
+        deployMult  = 1 + boost * ((al.sig.conf === 'H' || isFlash) ? 1 : 0.6);
+        szAdj *= deployMult;
+      }
+
       szAdj *= riskMult;
       const riskBlocked = !riskAllowEntry;
       if (regimeBlocked || regimeFiltered || riskBlocked) szAdj = 0;
@@ -731,10 +741,9 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
 
       const maturityDays = matu === '1M' ? 30 : 90;
       const exitRules = {
-        tpUnderlying:   al.sig.dir==='CALL' ? al.ind.price*1.03 : al.ind.price*0.97,
         slUnderlying:   al.sig.dir==='CALL' ? al.ind.price*0.95 : al.ind.price*1.05,
-        tpWarrant:      warrantPrice*1.20,
-        tpWarrantUltra: warrantPrice*1.30,
+        trailTrigger:   warrantPrice*(1+TRAIL_CFG.trigger),  // arme le stop suiveur
+        trailKeep:      TRAIL_CFG.keep,                      // verrouille 50% du gain max
         minHoldDays:    3,
         maxHoldDays:    maturityDays,
         thetaCritical:  matu==='1M' ? '7 jours restants' : '15 jours restants',
@@ -766,6 +775,7 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
           mm200Mult:    Math.round(mm200Mult*100)/100,
           isFriday,     sectorCapped,
           riskCapped,   riskMult,
+          deployMult:   Math.round(deployMult*100)/100,
         },
         // ── Infos warrant pour Telegram ──
         warrant: {
@@ -1118,6 +1128,28 @@ async function fetchRegime(env) {
 function parseDateSafe(s) { const d = new Date(s); return isNaN(d) ? null : d; }
 function daysBetween(d1, d2) { return Math.floor((d2-d1) / (24*3600*1000)); }
 
+// ─── Sorties v26 : stop suiveur 20/50 (validé +13.9%/an vs +5.5% TP fixe,
+//     pire DD inchangé — voir backtest/backtest_tipp.mjs --variants) ──────────
+const TRAIL_CFG = { trigger: 0.20, keep: 0.50 };
+
+// Reconstruit le plus-haut du warrant depuis l'entrée (approximation BS à
+// volatilité constante = vol60 actuelle) à partir des clôtures du sous-jacent.
+function estimateWarrantPeak(position, bars, sigNow, maxDays, entryDate) {
+  let peak = position.price;
+  if (!entryDate) return peak;
+  const entryMs = entryDate.getTime();
+  for (const b of bars) {
+    if (!b.t || b.t * 1000 < entryMs) continue;
+    const heldDays = Math.max(0, (b.t * 1000 - entryMs) / 86400000);
+    const T = Math.max((maxDays - heldDays) / 365, 0.001);
+    const w = position.type === 'CALL'
+      ? blackScholes(b.c, position.strike, T, sigNow).price
+      : Math.max(0.001, blackScholes(position.strike, b.c, T, sigNow).price);
+    if (w > peak) peak = w;
+  }
+  return peak;
+}
+
 function recommendForPosition(position, bars) {
   if (!bars || !bars.length) return { action:'INCONNU', color:'D', reason:'Bars sous-jacent indisponibles' };
   const S   = bars[bars.length-1].c;
@@ -1137,16 +1169,24 @@ function recommendForPosition(position, bars) {
   const warrantPnL    = (currentPrice - position.price) / position.price;
   const underlyingPnL = (S - position.entryS) / position.entryS;
 
-  if (warrantPnL >= 0.30 && daysHeld <= 5) return { action:'VENDRE', color:'G', reason:`🎯 TP ULTRA : warrant +${(warrantPnL*100).toFixed(1)}% en ${daysHeld}j`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
-  if (warrantPnL >= 0.25)                  return { action:'VENDRE', color:'G', reason:`✅ TP WARRANT : +${(warrantPnL*100).toFixed(1)}% atteint`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
-  if (position.type==='CALL' && underlyingPnL >= 0.03)  return { action:'VENDRE', color:'G', reason:`✅ TP SOUS-JACENT CALL : +${(underlyingPnL*100).toFixed(1)}%`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
+  // v26 : stop suiveur — on laisse courir les gagnants au lieu de couper à +25%
+  const peak     = estimateWarrantPeak(position, bars, sig, maxDays, entryDate);
+  const peakGain = peak - position.price;
+  if (peakGain >= TRAIL_CFG.trigger * position.price) {
+    const lockFloor = position.price + TRAIL_CFG.keep * peakGain;
+    if (currentPrice <= lockFloor) {
+      return { action:'VENDRE', color:'G', reason:`🎯 TRAIL : +${(warrantPnL*100).toFixed(1)}% verrouillé (pic +${(peakGain/position.price*100).toFixed(1)}%)`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
+    }
+  }
   if (position.type==='CALL' && underlyingPnL <= -0.05) return { action:'VENDRE', color:'R', reason:`🛑 STOP LOSS CALL : sous-jacent ${(underlyingPnL*100).toFixed(1)}%`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
-  if (position.type==='PUT'  && underlyingPnL <= -0.03) return { action:'VENDRE', color:'G', reason:`✅ TP SOUS-JACENT PUT : ${(underlyingPnL*100).toFixed(1)}%`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
   if (position.type==='PUT'  && underlyingPnL >= 0.05)  return { action:'VENDRE', color:'R', reason:`🛑 STOP LOSS PUT : sous-jacent +${(underlyingPnL*100).toFixed(1)}%`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
   const holdMax = position.matu === '1M' ? 10 : 14;
   if (daysHeld >= holdMax) return { action:'VENDRE', color:'Y', reason:`⏰ HOLD MAX (${holdMax}j) atteint`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
   if (position.matu==='1M' && (maxDays-daysHeld) <= 7) return { action:'VENDRE', color:'Y', reason:`⏰ THETA CRITIQUE : ${maxDays-daysHeld}j avant expiration 1M`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
-  return { action:'CONSERVER', color:'A', reason:`Position en cours — ${daysHeld}j détenu, warrant ${warrantPnL>=0?'+':''}${(warrantPnL*100).toFixed(1)}%`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
+  const trailInfo = peakGain >= TRAIL_CFG.trigger * position.price
+    ? ` · 🎯 trail actif, plancher ${(position.price + TRAIL_CFG.keep*peakGain).toFixed(4)}€`
+    : '';
+  return { action:'CONSERVER', color:'A', reason:`Position en cours — ${daysHeld}j détenu, warrant ${warrantPnL>=0?'+':''}${(warrantPnL*100).toFixed(1)}%${trailInfo}`, currentPrice, warrantPnL, underlyingPnL, daysHeld };
 }
 
 async function checkPositionsForExits(env) {
@@ -1317,10 +1357,10 @@ async function sendTelegram(alerts, vix, errors, env, capitalInfo, regime, exits
       for (const al of puts.slice(0,2)) msg += buildSignalBlock(al);
       if (puts.length > 2) msg += `_...et ${puts.length-2} autre(s) PUT_\n\n`;
     }
-    msg += `📋 *RAPPEL RÈGLES DE SORTIE*\n━━━━━━━━━━━━━━━━━━━━━━\n`;
-    msg += `• ⚡ *TP Warrant +20%* → vendre (+30% si ≤5j = TP ULTRA)\n`;
-    msg += `• ✅ *TP sous-jacent +3%* (CALL) → vendre\n`;
-    msg += `• ⛔ *SL sous-jacent -5%* (CALL) → vendre impérativement\n`;
+    msg += `📋 *RAPPEL RÈGLES DE SORTIE (v26 — stop suiveur)*\n━━━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `• 🎯 *Stop suiveur* : dès warrant +20%, vendre si retombée sous *entrée + 50% du gain max* (on laisse courir)\n`;
+    msg += `• ⛔ *SL sous-jacent -5%* (CALL, +5% PUT) → vendre impérativement\n`;
+    msg += `• ⏰ *Hold max 10j (1M) / 14j (3M)*\n`;
     msg += `• ⏱ *minHold 3 jours* avant vente volontaire\n`;
     msg += `• ⌛ *Theta critique* — 1M avec ≤7j restants → vendre\n\n`;
     if (errors.length > 0) msg += `⚠️ _${errors.length} ticker(s) inaccessibles ce scan_\n`;
@@ -1389,11 +1429,10 @@ function buildSignalBlock(al) {
     }
   } catch (e) {}
 
-  const wp   = al.sizing?.warrantPrice || 0;
-  const tpW  = (al.exitRules?.tpWarrant      || wp*1.20).toFixed(4);
-  const tpWU = (al.exitRules?.tpWarrantUltra || wp*1.30).toFixed(4);
-  const tpU  = (al.exitRules?.tpUnderlying   || (al.price||0)*(isCall?1.03:0.97)).toFixed(2);
-  const slU  = (al.exitRules?.slUnderlying   || (al.price||0)*(isCall?0.95:1.05)).toFixed(2);
+  const wp     = al.sizing?.warrantPrice || 0;
+  const trailT = (al.exitRules?.trailTrigger || wp*1.20).toFixed(4);
+  const keepPc = Math.round((al.exitRules?.trailKeep ?? 0.5)*100);
+  const slU    = (al.exitRules?.slUnderlying || (al.price||0)*(isCall?0.95:1.05)).toFixed(2);
   const theta   = al.exitRules?.thetaCritical || '7 jours restants';
   const maxDays = al.exitRules?.maxHoldDays || 90;
 
@@ -1420,11 +1459,11 @@ function buildSignalBlock(al) {
   block += `• ${urgency}\n\n`;
 
   // ── Seuils de sortie ──
-  block += `📤 *SEUILS DE SORTIE*\n`;
-  block += `• ✅ TP warrant   : \`${tpW}€\` (+20%) ou \`${tpWU}€\` (+30% si ≤5j)\n`;
+  block += `📤 *SEUILS DE SORTIE (v26 — stop suiveur)*\n`;
+  block += `• 🎯 Trail armé dès : \`${trailT}€\` (warrant +20%) → vendre si retombée sous entrée + ${keepPc}% du gain max\n`;
   block += isCall
-    ? `• ✅ TP sous-jacent : \`${tpU}€\` (+3%)\n• ⛔ SL sous-jacent : \`${slU}€\` (-5%)\n`
-    : `• ✅ TP sous-jacent : \`${tpU}€\` (-3%)\n• ⛔ SL sous-jacent : \`${slU}€\` (+5%)\n`;
+    ? `• ⛔ SL sous-jacent : \`${slU}€\` (-5%)\n`
+    : `• ⛔ SL sous-jacent : \`${slU}€\` (+5%)\n`;
   block += `• ⏱ minHold : pas de vente avant *${minHoldDate}* (J+3)\n`;
   block += `• 📅 maxHold : vendre avant *${maxHoldDate}* (J+${maxDays})\n`;
   block += `• ⌛ Theta critique : ${theta}\n`;
@@ -1445,5 +1484,5 @@ function buildSignalBlock(al) {
 // ─── Exports nommés (backtest/validation — ignorés par Cloudflare Workers) ────
 export {
   precompute, scanIndicators, detectSignal, computeSizing, blackScholes,
-  vixMultiplier, tippRiskBudget, RISK_CFG, SCAN_CFG,
+  vixMultiplier, tippRiskBudget, RISK_CFG, SCAN_CFG, TRAIL_CFG,
 };
