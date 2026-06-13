@@ -30,9 +30,11 @@ import {
 const NB_RUNS  = Math.max(10, Number(process.argv[2]) || 200);
 const TORTURE  = process.argv.includes('--torture');
 const VARIANTS = process.argv.includes('--variants');
+const yearsArg = process.argv.find(a => a.startsWith('--years='));
+const YEARS    = yearsArg ? Math.max(1, Number(yearsArg.split('=')[1]) || 1) : 1;
 const NT       = 40;
 const WARMUP   = 270;
-const DAYS     = 252;
+const DAYS     = 252 * YEARS;          // horizon : YEARS années de bourse
 const N        = WARMUP + DAYS;
 const CAPITAL0 = 10000;
 const SPREAD   = 0.015;
@@ -356,21 +358,25 @@ function quantile(arr, q) {
   const s = [...arr].sort((a, b) => a - b);
   return s[Math.min(s.length - 1, Math.max(0, Math.floor(q * (s.length - 1))))];
 }
+const cagr = totalRet => Math.pow(1 + totalRet, 1 / YEARS) - 1;   // rendement annualisé
 function report(label, runs) {
   const rets = runs.map(r => r.ret), dds = runs.map(r => r.maxDD);
   const ruined = runs.filter(r => r.minEq <= 0).length;
   const over45 = runs.filter(r => r.maxDD > 0.45).length;
   const breaches = runs.reduce((s, r) => s + r.floorBreach, 0);
   const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
+  const mult = totalRet => (1 + totalRet).toFixed(2) + '×';   // capital final / initial
   console.log(`\n── ${label} ─────────────────────────────────────`);
-  console.log(`  Rendement 1 an   : médiane ${pct(quantile(rets, 0.5))} · moyenne ${pct(mean(rets))} · p5 ${pct(quantile(rets, 0.05))} · p95 ${pct(quantile(rets, 0.95))}`);
+  console.log(`  Rendement ${YEARS} an${YEARS > 1 ? 's' : ''} : médiane ${pct(quantile(rets, 0.5))} (${mult(quantile(rets, 0.5))}) · moyenne ${pct(mean(rets))} · p5 ${pct(quantile(rets, 0.05))} · p95 ${pct(quantile(rets, 0.95))}`);
+  if (YEARS > 1)
+    console.log(`  CAGR (annualisé) : médiane ${pct(cagr(quantile(rets, 0.5)))} · moyenne ${pct(cagr(mean(rets)))} · p5 ${pct(cagr(quantile(rets, 0.05)))} · p95 ${pct(cagr(quantile(rets, 0.95)))}`);
   console.log(`  Max drawdown     : médiane ${pct(quantile(dds, 0.5))} · pire ${pct(Math.max(...dds))} · DD>45% : ${over45}/${runs.length}`);
-  console.log(`  Ruine ${ruined} · violations plancher ${breaches} · trades/an méd. ${quantile(runs.map(r => r.nTrades), 0.5)} · win ${pct(mean(runs.map(r => r.winRate)))}`);
+  console.log(`  Ruine ${ruined} · violations plancher ${breaches} · trades/an méd. ${(quantile(runs.map(r => r.nTrades), 0.5) / YEARS).toFixed(0)} · win ${pct(mean(runs.map(r => r.winRate)))}`);
   console.log(`  PnL moyen/run    : MR ${mean(runs.map(r => r.pnlMR)).toFixed(0)}€ · MOMO ${mean(runs.map(r => r.pnlMomo)).toFixed(0)}€`);
   return { over45, ruined, breaches };
 }
 
-console.log(`Backtest Monte-Carlo WARRANTPRO v26 — ${NB_RUNS} runs × ${DAYS} j × ${NT} tickers${TORTURE ? ' · MODE TORTURE' : ''}`);
+console.log(`Backtest Monte-Carlo WARRANTPRO v26 — ${NB_RUNS} runs × ${YEARS} an${YEARS > 1 ? 's' : ''} (${DAYS} j) × ${NT} tickers${TORTURE ? ' · MODE TORTURE' : ''}`);
 const t0 = Date.now();
 const toRun = VARIANTS ? Object.entries(STRATS) : [['v25 (MR seul)', STRATS['v25 (MR seul)']], ['v26 (trailMR+DEPLOY)', STRATS['v26 (trailMR+DEPLOY)']]];
 const results = toRun.map(() => []);
