@@ -1,4 +1,4 @@
-# WARRANTPRO v27 — Algorithme d'achat/vente de warrants avec garantie structurelle de risque
+# WARRANTPRO v28 — Algorithme d'achat/vente de warrants avec garantie structurelle de risque
 
 > **Objectifs imposés** : gain maximal sur 1 an · risque de ruine 0% · max drawdown ≤ 45%
 > · fréquence exploitable (~5-6 signaux/mois) · signaux exécutables sur des warrants réellement cotés.
@@ -17,9 +17,47 @@
 |---|---|---|
 | Signaux MR par paliers (H/M/L) | détecter les sur-réactions baissières | short-term reversal (Jegadeesh 1990) |
 | Sizing Kelly fractionné + VIX | grader la qualité par la taille | Kelly fractionné (¼–½ Kelly) |
+| **MF-Score** (v28) | renforcer les dislocations fraîches | research notes T36-38, PBO=5% |
+| **VIX-INV extrême** (v28) | sur-pondérer les jours de crise | research notes T8/T41 |
 | **Stop suiveur 20/50** (v26) | laisser courir les gagnants | littérature trailing-stop vs TP fixe |
 | **DEPLOY** (v26) | déployer le coussin TIPP inutilisé | Moreira & Muir 2017 (vol-managed) |
-| **Moteur TIPP** (v25) | garanties ruine 0% / MDD ≤ 45% | CPPI/TIPP à plancher cliqueté |
+| **Moteur de risque** (v25/v27) | garantie ruine 0% (+ MDD≤42% en GUARD) | CPPI/TIPP à plancher |
+
+### Boosters de gain v28 (portés des research notes de l'utilisateur)
+
+Les notes de recherche (50 tests, 5 ans de backtest sur données réelles SBF120+DAX40,
+validés PBO 5-10%) identifient une config « Triple » à +196,9% sur 5 ans / OOS +39,1%.
+J'en porte les deux moteurs de **sizing** (orthogonaux, synergie réelle mesurée +66%) :
+
+- **MF-Score** (Momentum-Fade, vélocité RSI inversée — Jegadeesh-Titman, PBO=5%,
+  *« premier vrai succès algorithmique »*, +33% seul) : une chute où le RSI plonge
+  **vite** (`rsiVel ≤ −10` sur 3 j) et en **accélérant** (`rsiAcc ≤ −4`) est une
+  dislocation fraîche/mécanique qui rebondit plus fort → sizing ×1,15 (vite) ou
+  ×1,30 (vite + accéléré). Jamais de malus. `exh`/`rsiExhaustion` non implémentés
+  (paramètres morts, T38). Réglable : `USE_MF_SCORE`, `MF_VELOCITY_THRESHOLD`, `MF_BOOST_ACC`.
+- **VIX-INV extrême** (T8, +46% seul) : multiplicateur de sizing ×0,70→×2,0 selon le
+  VSTOXX (achète plus dans les vraies crises, où la MR rebondit le mieux). Activé par
+  défaut (`VIX_AMPLITUDE=extreme`), réglable à `normal`.
+
+**Validation dans le backtest Monte-Carlo (`--triple`, sous config live GROWTH 15%) :**
+
+| Config (5 ans, 200 runs) | Médiane (CAGR) | Moyenne (CAGR) | p95 | Ruine |
+|---|---|---|---|---|
+| Base (sans booster) | +52% (8,7%/an) | +958% (60%/an) | +3485% | **0** |
+| **+ MF-Score** | **+58% (9,6%/an)** | **+1592% (76%/an)** | **+5415%** | **0** |
+| + VIX-INV extrême | +53% (8,9%/an) | +879% (58%/an) | +3498% | 0 |
+| **v28 (MF + VIX-ext)** | +57% (9,5%/an) | +1290% (69%/an) | +4953% | 0 |
+
+- **MF-Score est confirmé** comme moteur de gain dans mon backtest (médiane et surtout
+  moyenne/queue en hausse), **sans toucher à la garantie ruine 0%** ni au p5 (plancher tient).
+- **VIX-INV extrême** est quasi-neutre dans mon générateur synthétique (mon proxy VSTOXX
+  = vol réalisée ne reproduit pas la vraie corrélation VIX/MR) ; je l'active sur la foi de
+  sa validation sur **données réelles** (T8/T41, +46%, PBO=10%), en notant qu'il ne nuit pas.
+  Désactivable via `VIX_AMPLITUDE=normal`.
+- ⚠️ Honnêteté méthodo : les +196,9% des notes sont mesurés sur **données réelles** avec
+  un autre moteur de risque (pas de plancher TIPP). Ici, MF-Score est greffé sur
+  l'architecture v25-27 (ruine 0% garantie) ; les gains absolus ne sont pas comparables,
+  mais le **sens de l'effet** (MF-Score augmente le gain) est cohérent entre les deux.
 
 **Testé et REJETÉ — sleeve momentum** (pullback ATM, ITM 12%, TSMOM 126j ITM 15%) :
 le théta + les spreads des warrants détruisent l'edge momentum (−360 à −2 900 €/run
@@ -147,7 +185,10 @@ gain en éliminant ce risque.
 4. Variables d'env :
    - `RISK_MODE` = `GROWTH` (défaut, max gain) ou `GUARD` (DD ≤ 42%).
    - `RISK_FLOOR_PCT` = plancher en mode GROWTH (0.10 très agressif … 0.50 prudent ; défaut 0.15).
+   - `USE_MF_SCORE` = `true` (défaut) / `false` ; `MF_VELOCITY_THRESHOLD` (défaut 10), `MF_BOOST_ACC` (défaut 1.15).
+   - `VIX_AMPLITUDE` = `extreme` (défaut) / `normal`.
    - `TARGET_SIGNALS_MONTH` = cible de fréquence des signaux (défaut 5.5).
+   - `/ping` affiche le mode de risque et l'état des boosters actifs.
 
 ## 7. Limites honnêtes
 

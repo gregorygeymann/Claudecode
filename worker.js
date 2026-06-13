@@ -302,9 +302,14 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
 
     if (url.pathname === '/ping') {
+      const mfc = pickMfCfg(env);
       return new Response(JSON.stringify({
-        ok: true, version: 'worker_v27_growth',
+        ok: true, version: 'worker_v28_mfscore',
         riskMode: pickRiskMode(env).floorMode === 'initial' ? `GROWTH (plancher ${Math.round(pickRiskMode(env).floorPct*100)}%)` : 'GUARD (DD≤42%)',
+        boosters: {
+          mfScore: mfc.enabled ? `actif (vel≤-${mfc.velThreshold} → ×${mfc.boostAcc}/×${mfc.boostFull})` : 'désactivé',
+          vixAmplitude: env.VIX_AMPLITUDE || 'extreme',
+        },
         timestamp: new Date().toISOString(),
         env: {
           TG_TOKEN:    env.TG_TOKEN   ? `présent (${env.TG_TOKEN.slice(0,8)}...)` : '❌ MANQUANT',
@@ -697,7 +702,9 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
   const allResults = Object.values(barsMeta).map(({ tk, ind, sig, bs }) => ({ ...tk, ind, sig, bs }));
   for (const r of allResults) r.sectorCorr = r.sig ? sectorCorrelation(r, allResults) : null;
 
-  const vixAmplitude = env?.VIX_AMPLITUDE || 'normal';
+  const mfCfg = pickMfCfg(env);
+  // VIX-INV extrême par défaut (validé +46% seul, MDD amélioré -1.7pp — research T8).
+  const vixAmplitude = env?.VIX_AMPLITUDE || 'extreme';
   const vixMult      = vix ? vixMultiplier(vix.current, vixAmplitude) : 1.0;
   const vixDailyCap  = vix ? (vix.current<15?0.50:vix.current<20?0.60:vix.current<25?0.70:vix.current<30?0.80:0.90) : 0.60;
 
@@ -719,6 +726,8 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
 
       let szPct = computeSizing(al.ind.z, al.ind.rsi, al.ind.sq, al.ind.ret63, isFlash, al.s, vixMult);
       szPct *= regKellyMult;
+      const mfBoost = mfScoreBoost(al.ind, mfCfg);   // booster MF-Score (qualité du signal)
+      szPct *= mfBoost;
       let szAdj = szPct;
 
       // mm200Mult désactivé (Test v24.1 — filtre rejeté OOS)
@@ -840,6 +849,7 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
           isFriday,     sectorCapped,
           riskCapped,   riskMult,
           deployMult:   Math.round(deployMult*100)/100,
+          mfBoost:      Math.round(mfBoost*100)/100,
         },
         // ── Infos warrant pour Telegram (sélection réaliste) ──
         warrant: {
@@ -965,11 +975,18 @@ function scanIndicators(bars) {
     aboveMM200 = ind.c[d] >= mm200;
   }
 
+  // MF-Score (Jegadeesh-Titman, vélocité RSI inversée) : vitesse + accélération
+  // de la chute du RSI. Une dislocation « fraîche » (RSI qui plonge vite) rebondit
+  // plus fort. rsiVel = variation RSI sur 3j ; rsiAcc = accélération sur 3j.
+  const rsiVel = d >= 3 ? Math.round(ind.rsi[d] - ind.rsi[d-3]) : 0;
+  const rsiAcc = d >= 6 ? Math.round((ind.rsi[d] - ind.rsi[d-3]) - (ind.rsi[d-3] - ind.rsi[d-6])) : 0;
+
   return {
     price:  ind.c[d],
     ret5,
     z:      Math.round(z*100)/100,
     rsi:    Math.round(rsi),
+    rsiVel, rsiAcc,
     vol60:  Math.round(vol60*1000)/10,
     sq, sqFresh,
     ret63:  Math.round(ret63*1000)/10,
@@ -1056,6 +1073,40 @@ function tippRiskBudget(equity, state, cfg = RISK_CFG, initialCapital = null) {
     deployAnyDD: !!cfg.deployAnyDD, deployBoostMax: cfg.deployBoostMax ?? 0.5, sizingCapMax: cfg.sizingCapMax ?? 0.25,
     state: s,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  MF-SCORE v28 — booster de sizing validé (research notes T36-T38, PBO=5%)
+//
+//  « Momentum-Fade » (Jegadeesh-Titman, vélocité RSI inversée). Une chute où le
+//  RSI plonge VITE et en ACCÉLÉRANT est une dislocation fraîche, mécanique, qui
+//  rebondit plus fort qu'une érosion lente. On augmente la taille de ces signaux.
+//  Backtests : +33% de capital seul (PBO=5%), synergie +66% avec VIX-INV extrême
+//  (config C3 : +145% sur 5 ans, OOS +37.7%). exh/rsiExhaustion = paramètres morts
+//  (T38) → non implémentés : MF-Score = 1 seul seuil effectif (vélocité).
+// ═══════════════════════════════════════════════════════════════════════════════
+const MF_CFG = { enabled: true, velThreshold: 10, accelThreshold: 4, boostAcc: 1.15, boostFull: 1.30 };
+
+function pickMfCfg(env) {
+  if (env && (env.USE_MF_SCORE === 'false' || env.USE_MF_SCORE === false)) return { ...MF_CFG, enabled: false };
+  const vt = Number(env?.MF_VELOCITY_THRESHOLD);
+  const ba = Number(env?.MF_BOOST_ACC);
+  return {
+    ...MF_CFG,
+    velThreshold: vt > 0 ? vt : MF_CFG.velThreshold,
+    boostAcc:     ba > 1 ? ba : MF_CFG.boostAcc,
+  };
+}
+
+// Multiplicateur de sizing. Boost partiel si le RSI chute vite (vélocité), boost
+// plein si la chute accélère aussi (fraîcheur maximale). Jamais de malus (≥ 1).
+function mfScoreBoost(ind, cfg = MF_CFG) {
+  if (!cfg.enabled || !ind || ind.rsiVel == null) return 1;
+  const fast = ind.rsiVel <= -cfg.velThreshold;          // RSI a chuté ≥ seuil sur 3j
+  const accel = (ind.rsiAcc ?? 0) <= -cfg.accelThreshold; // la chute accélère
+  if (fast && accel) return cfg.boostFull;
+  if (fast)          return cfg.boostAcc;
+  return 1;
 }
 
 // ─── Signaux par paliers v26.1 ────────────────────────────────────────────────
@@ -1646,6 +1697,9 @@ function buildSignalBlock(al) {
   // ── Indicateurs techniques ──
   const ind = al.indicators || {};
   block += `📊 z=\`${ind.z??'?'}σ\` · RSI=\`${ind.rsi??'?'}\` · Vol60=\`${ind.vol60??'?'}%\` · Ret5=\`${ind.ret5??'?'}%\`\n`;
+  const mfB = al.sizing?.mfBoost;
+  if (mfB > 1.2)      block += `⚡ *MF-Score ACCÉLÉRÉ* (×${mfB}) — dislocation fraîche, sizing renforcé\n`;
+  else if (mfB > 1)   block += `↗️ MF-Score actif (×${mfB}) — chute rapide\n`;
 
   if (ind.gapRisk==='high')     block += `⚠️ Gap élevé J-1 (${ind.gapPct!=null?(ind.gapPct>0?'+':'')+ind.gapPct:'?'}%) — vérifier news\n`;
   else if (ind.gapRisk==='moderate') block += `ℹ️ Gap modéré J-1 (${ind.gapPct!=null?(ind.gapPct>0?'+':'')+ind.gapPct:'?'}%)\n`;
@@ -1659,6 +1713,6 @@ function buildSignalBlock(al) {
 // ─── Exports nommés (backtest/validation — ignorés par Cloudflare Workers) ────
 export {
   precompute, scanIndicators, detectSignal, computeSizing, blackScholes,
-  vixMultiplier, tippRiskBudget, replaySignals, countSignalsPerMonth,
-  RISK_CFG, RISK_MODES, SCAN_CFG, TRAIL_CFG, SIGNAL_CFG,
+  vixMultiplier, tippRiskBudget, mfScoreBoost, replaySignals, countSignalsPerMonth,
+  RISK_CFG, RISK_MODES, SCAN_CFG, TRAIL_CFG, SIGNAL_CFG, MF_CFG,
 };

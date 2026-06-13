@@ -23,7 +23,7 @@
  */
 import {
   scanIndicators, detectSignal, computeSizing, blackScholes,
-  vixMultiplier, tippRiskBudget, RISK_CFG, RISK_MODES, TRAIL_CFG,
+  vixMultiplier, tippRiskBudget, mfScoreBoost, RISK_CFG, RISK_MODES, TRAIL_CFG,
 } from '../worker.js';
 
 // ─── Paramètres ───────────────────────────────────────────────────────────────
@@ -40,10 +40,12 @@ const CAPITAL0 = 10000;
 const SPREAD   = 0.015;
 const GAP_P    = 0.002;
 
-const RISK = process.argv.includes('--risk');
+const RISK   = process.argv.includes('--risk');
+const TRIPLE = process.argv.includes('--triple');
 const TRAIL = { trailTrig: TRAIL_CFG.trigger, trailKeep: TRAIL_CFG.keep };
 const v26base = { momo: false, deploy: true, trailMR: true, ...TRAIL };
 const growth = fp => ({ ...RISK_MODES.GROWTH, floorPct: fp });
+const g15 = growth(0.15);
 
 const STRATS = {
   'v25 (MR seul)':         { momo: false, deploy: false, trailMR: false },
@@ -51,6 +53,16 @@ const STRATS = {
   'DEPLOY seul':           { momo: false, deploy: true,  trailMR: false },
   'MOMO (rejeté)':         { momo: true,  deploy: false, trailMR: false },
   'v26 (trailMR+DEPLOY)':  { ...v26base },
+};
+
+// Ablation des boosters de gain validés (research notes T36-43), sous la config
+// live (GROWTH plancher 15%). MF-Score (PBO=5%) et VIX-INV extrême sont
+// orthogonaux → on attend une synergie sur le combiné (« Triple-lite »).
+const TRIPLE_SWEEP = {
+  'v27 base (GROWTH 15%)':       { ...v26base, riskCfg: g15 },
+  '+ MF-Score':                  { ...v26base, riskCfg: g15, mf: true },
+  '+ VIX-INV extrême':           { ...v26base, riskCfg: g15, vixExt: true },
+  'v28 (MF + VIX-ext)':          { ...v26base, riskCfg: g15, mf: true, vixExt: true },
 };
 
 // Balayage du plancher : GUARD (DD≤42%) → GROWTH plancher de plus en plus bas.
@@ -288,7 +300,7 @@ function simulate(seed, engineOn, strat) {
     if (mf.sig20 > 0.35 || mf.ret20 < -0.12) { kelly = 0; capMult = 0; allowEntry = false; }
     else if (mf.sig20 > 0.22 || mf.ret20 < -0.06) { kelly = 0.66; capMult = 0.66; zAdd = 0.5; }
     const vstoxx   = Math.max(10, mf.sig20 * 100 * 1.1);
-    const vMult    = vixMultiplier(vstoxx, 'normal');
+    const vMult    = vixMultiplier(vstoxx, strat.vixExt ? 'extreme' : 'normal');
     const dailyCap = (vstoxx < 15 ? 0.50 : vstoxx < 20 ? 0.60 : vstoxx < 25 ? 0.70 : vstoxx < 30 ? 0.80 : 0.90) * capMult;
     let dailyUsed  = 0;
 
@@ -326,6 +338,7 @@ function simulate(seed, engineOn, strat) {
           szAdj = Math.min(0.12, szAdj);
         } else {
           szAdj = computeSizing(ind.z, ind.rsi, ind.sq, ind.ret63, isFlash, 'X', vMult) * kelly; // PRODUCTION
+          if (strat.mf) szAdj *= mfScoreBoost(ind);                  // booster MF-Score (PRODUCTION)
           szAdj = Math.min(engineOn ? (budget.sizingCapMax ?? 0.25) : 0.25, szAdj);
         }
         if (deployOn) {
@@ -403,23 +416,25 @@ function report(label, runs) {
 
 console.log(`Backtest Monte-Carlo WARRANTPRO v26 — ${NB_RUNS} runs × ${YEARS} an${YEARS > 1 ? 's' : ''} (${DAYS} j) × ${NT} tickers${TORTURE ? ' · MODE TORTURE' : ''}`);
 const t0 = Date.now();
-const toRun = RISK ? Object.entries(RISK_SWEEP)
+const toRun = TRIPLE ? Object.entries(TRIPLE_SWEEP)
+  : RISK ? Object.entries(RISK_SWEEP)
   : VARIANTS ? Object.entries(STRATS)
-  : [['v25 (MR seul)', STRATS['v25 (MR seul)']], ['v26 (trailMR+DEPLOY)', STRATS['v26 (trailMR+DEPLOY)']]];
+  : [['v27 base (GROWTH 15%)', TRIPLE_SWEEP['v27 base (GROWTH 15%)']], ['v28 (MF + VIX-ext)', TRIPLE_SWEEP['v28 (MF + VIX-ext)']]];
 const results = toRun.map(() => []);
 const offEngine = [];
+const ruinOnly = RISK || TRIPLE;   // modes GROWTH : on n'enforce que la ruine 0
 for (let i = 0; i < NB_RUNS; i++) {
   for (let s = 0; s < toRun.length; s++) results[s].push(simulate(1000 + i, true, toRun[s][1]));
-  if (!RISK) offEngine.push(simulate(1000 + i, false, toRun[toRun.length - 1][1]));
+  if (!ruinOnly) offEngine.push(simulate(1000 + i, false, toRun[toRun.length - 1][1]));
   if ((i + 1) % 50 === 0) console.log(`  ... ${i + 1}/${NB_RUNS} (${((Date.now() - t0) / 1000).toFixed(0)}s)`);
 }
 const checks = [];
 for (let s = 0; s < toRun.length; s++) checks.push(report(`${toRun[s][0]} — moteur ON`, results[s]));
 let finalCheck = checks[checks.length - 1];
-if (!RISK) report(`${toRun[toRun.length - 1][0]} — SANS moteur (référence)`, offEngine);
+if (!ruinOnly) report(`${toRun[toRun.length - 1][0]} — SANS moteur (référence)`, offEngine);
 
 console.log('\n══ VERDICT ══════════════════════════════════════');
-if (RISK) {
+if (ruinOnly) {
   // En mode GROWTH, on accepte de gros DD : la SEULE garantie testée est ruine 0.
   const anyRuin = checks.some(c => c.ruined > 0);
   const anyBreach = checks.some(c => c.breaches > 0);
