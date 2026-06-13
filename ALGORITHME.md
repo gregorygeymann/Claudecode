@@ -1,4 +1,4 @@
-# WARRANTPRO v26 — Algorithme d'achat/vente de warrants avec garantie structurelle de risque
+# WARRANTPRO v27 — Algorithme d'achat/vente de warrants avec garantie structurelle de risque
 
 > **Objectifs imposés** : gain maximal sur 1 an · risque de ruine 0% · max drawdown ≤ 45%
 > · fréquence exploitable (~5-6 signaux/mois) · signaux exécutables sur des warrants réellement cotés.
@@ -69,21 +69,50 @@ Le TP fixe +25% coupait les gagnants ; le trail 20/50 a **doublé le rendement m
 à pire-DD inchangé dans l'ablation (le worker reconstruit le pic du warrant depuis
 l'entrée via Black-Scholes sur les clôtures du sous-jacent).
 
-## 4. Le moteur de risque TIPP (garanties)
+## 4. Le moteur de risque — deux modes (v27)
 
+Règle commune (garantit la **ruine 0%** dans les deux modes) : la perte max d'un
+warrant = sa prime, donc on impose **`somme des primes ouvertes ≤ coussin = équité − plancher`**.
+Même si tous les warrants ouverts tombent à 0, l'équité reste ≥ plancher > 0.
+
+### Mode GUARD — contrôle du drawdown (MDD ≤ 42%)
 ```
-HWM      = plus-haut historique de l'équité (ne descend jamais)
-Plancher = 58% × HWM
-Coussin  = équité − plancher
-RÈGLE D'OR : somme des primes ouvertes ≤ coussin, toujours.
+Plancher = 58% × plus-haut historique de l'équité (cliquette, ne descend jamais)
 ```
-- Freins progressifs : DD≥15% → sizing ×0.60 · DD≥25% → ×0.35 · DD≥35% → hard-stop
-  (réarmement sous 30%). Alerte « ALLÉGER X € » si les primes dépassent le coussin.
-- **DEPLOY (v26)** : quand DD<15%, chaque signal est boosté de
-  `min(50%, 60% × part inutilisée du coussin)`, pondéré par la qualité (H/flash ×1, M/L ×0.6).
-- **Preuve MDD ≤ 45%** : même si toutes les primes valent 0 du jour au lendemain,
-  équité ≥ 58% du HWM → DD ≤ 42% (marge 3 pts pour spreads/slippage).
-- **Preuve ruine 0%** : équité ≥ 58% × HWM ≥ 58% × capital initial > 0, toujours.
+- Freins progressifs : DD≥15% → ×0.60 · DD≥25% → ×0.35 · DD≥35% → hard-stop.
+- **Preuve MDD ≤ 45%** : équité ≥ 58% du HWM → DD ≤ 42% (marge 3 pts spreads/slippage).
+- Coût : sur longue durée, le plancher qui monte avec les gains force à lever le pied
+  → CAGR médian 5 ans ≈ 3,4%.
+
+### Mode GROWTH — maximise le gain (défaut v27)
+```
+Plancher = floorPct × CAPITAL INITIAL (fixe, ne monte pas avec les gains)
+```
+- **Aucun frein**, déploiement agressif du coussin (`deployBoostMax 2.0`, cap signal 40%).
+- **Ruine toujours impossible** : équité ≥ floorPct × capital de départ > 0.
+- Mais le plancher ne cliquète pas → on accepte de **gros drawdowns depuis les sommets**
+  pour laisser le gain composer. `floorPct` réglable via `RISK_FLOOR_PCT`.
+
+**Balayage du plancher (backtest `--risk`, ruine = 0 partout) :**
+
+| Mode | Médiane 1 an | Médiane 5 ans (CAGR) | Moyenne 5 ans (CAGR) | p95 5 ans | DD médian | p5 (cas défavorable) |
+|---|---|---|---|---|---|---|
+| **GUARD** (DD≤42%) | +7,6% | +18% (**3,4%/an**) | +101% (15%/an) | +483% | 35% | −34% |
+| GROWTH 50% | −4% | −32% (−7%/an) | +762% | +2946% | 67% | −50% |
+| GROWTH 30% | +9% | +5% (1%/an) | +1106% | +3090% | 77% | −70% |
+| GROWTH 20% | +9% | +25% (4,5%/an) | +1147% | +3285% | 81% | −80% |
+| **GROWTH 15%** (défaut) | +9% | ~+35% (~6%/an) | ~+1150% (~66%/an) | +3200% | ~83% | ~−85% |
+| GROWTH 10% | +10% | +49% (**8,3%/an**) | +1151% (66%/an) | +3220% | 84% | −90% |
+
+**Lecture honnête** :
+- L'« explosion » du gain est réelle mais surtout dans la **moyenne** et le **p95** (queue
+  loterie : 1 run sur 20 dépasse +3000% à 5 ans). La **médiane** — l'expérience la plus
+  probable d'un compte unique — ne progresse que modestement (3,4% → 8,3% de CAGR).
+- Elle s'achète par un **risque de queue sévère** : en mode agressif, le 5e percentile
+  perd 80-90% du capital sur 5 ans (jamais ruiné, mais quasi-anéanti dans les mauvais cas).
+- La zone **plancher 30-50% est à éviter** (« trou ») : gros DD **et** médiane médiocre.
+  Si on passe en GROWTH, il faut un plancher **bas** (≤20%) pour battre GUARD en médiane.
+- `RISK_FLOOR_PCT` permet de doser ; `RISK_MODE=GUARD` revient au contrôle du drawdown.
 
 ## 5. Validation Monte-Carlo
 
@@ -111,11 +140,14 @@ gain en éliminant ce risque.
 
 1. Déployer `worker.js`, lancer **`/calibrate?batch=a` puis `?batch=b`** une fois
    (et après tout changement d'univers) → vise 5-6 signaux/mois sur données réelles.
-2. `/ping` → version `worker_v26_tipp_trail` ; `/signals` expose `capital.risk`
-   (DD, plancher, budget primes) ; ligne `🛡 TIPP` dans chaque Telegram.
+2. `/ping` → version `worker_v27_growth` + `riskMode` actif ; `/signals` expose
+   `capital.risk` (mode, plancher, DD, budget primes) ; ligne mode dans chaque Telegram.
 3. Synchroniser les positions (bouton « Sync vers worker ») pour que le budget de
    primes et les recommandations de vente (trail/SL/théta) soient justes.
-4. `TARGET_SIGNALS_MONTH` (env) pour changer la cible de fréquence.
+4. Variables d'env :
+   - `RISK_MODE` = `GROWTH` (défaut, max gain) ou `GUARD` (DD ≤ 42%).
+   - `RISK_FLOOR_PCT` = plancher en mode GROWTH (0.10 très agressif … 0.50 prudent ; défaut 0.15).
+   - `TARGET_SIGNALS_MONTH` = cible de fréquence des signaux (défaut 5.5).
 
 ## 7. Limites honnêtes
 

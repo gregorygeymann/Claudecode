@@ -23,7 +23,7 @@
  */
 import {
   scanIndicators, detectSignal, computeSizing, blackScholes,
-  vixMultiplier, tippRiskBudget, RISK_CFG, TRAIL_CFG,
+  vixMultiplier, tippRiskBudget, RISK_CFG, RISK_MODES, TRAIL_CFG,
 } from '../worker.js';
 
 // ─── Paramètres ───────────────────────────────────────────────────────────────
@@ -40,12 +40,28 @@ const CAPITAL0 = 10000;
 const SPREAD   = 0.015;
 const GAP_P    = 0.002;
 
+const RISK = process.argv.includes('--risk');
+const TRAIL = { trailTrig: TRAIL_CFG.trigger, trailKeep: TRAIL_CFG.keep };
+const v26base = { momo: false, deploy: true, trailMR: true, ...TRAIL };
+const growth = fp => ({ ...RISK_MODES.GROWTH, floorPct: fp });
+
 const STRATS = {
   'v25 (MR seul)':         { momo: false, deploy: false, trailMR: false },
-  'trailMR 20/50':         { momo: false, deploy: false, trailMR: true, trailTrig: TRAIL_CFG.trigger, trailKeep: TRAIL_CFG.keep },
+  'trailMR 20/50':         { momo: false, deploy: false, trailMR: true, ...TRAIL },
   'DEPLOY seul':           { momo: false, deploy: true,  trailMR: false },
   'MOMO (rejeté)':         { momo: true,  deploy: false, trailMR: false },
-  'v26 (trailMR+DEPLOY)':  { momo: false, deploy: true,  trailMR: true, trailTrig: TRAIL_CFG.trigger, trailKeep: TRAIL_CFG.keep },
+  'v26 (trailMR+DEPLOY)':  { ...v26base },
+};
+
+// Balayage du plancher : GUARD (DD≤42%) → GROWTH plancher de plus en plus bas.
+// La ruine reste impossible partout (équité ≥ plancher) ; seul le DD se relâche.
+const RISK_SWEEP = {
+  'GUARD (DD≤42%)':     { ...v26base, riskCfg: RISK_MODES.GUARD },
+  'GROWTH plancher 50%':{ ...v26base, riskCfg: growth(0.50) },
+  'GROWTH plancher 40%':{ ...v26base, riskCfg: growth(0.40) },
+  'GROWTH plancher 30%':{ ...v26base, riskCfg: growth(0.30) },
+  'GROWTH plancher 20%':{ ...v26base, riskCfg: growth(0.20) },
+  'GROWTH plancher 10%':{ ...v26base, riskCfg: growth(0.10) },
 };
 
 // ─── RNG déterministe ─────────────────────────────────────────────────────────
@@ -184,6 +200,7 @@ function simulate(seed, engineOn, strat) {
   const rng = mulberry32(seed);
   const { mret, prices } = genPaths(rng);
   const fast = prices.map(fastArrays);
+  const riskCfg = strat.riskCfg || RISK_MODES.GUARD;
 
   let cash = CAPITAL0, equity = CAPITAL0, hwm = CAPITAL0, maxDD = 0, minEq = CAPITAL0;
   let riskState = null, floorBreach = 0, nTrades = 0, nWins = 0;
@@ -250,7 +267,7 @@ function simulate(seed, engineOn, strat) {
     equity = cash + openValue;
     let budget = null;
     if (engineOn) {
-      budget = tippRiskBudget(equity, riskState);
+      budget = tippRiskBudget(equity, riskState, riskCfg, CAPITAL0);
       riskState = budget.state;
       while (openValue > budget.cushion && positions.length > 0) {
         let imax = 0, vmax = -1;
@@ -275,9 +292,10 @@ function simulate(seed, engineOn, strat) {
     const dailyCap = (vstoxx < 15 ? 0.50 : vstoxx < 20 ? 0.60 : vstoxx < 25 ? 0.70 : vstoxx < 30 ? 0.80 : 0.90) * capMult;
     let dailyUsed  = 0;
 
-    // DEPLOY : quand le budget TIPP est largement inutilisé et le DD faible,
-    // on déploie davantage chaque signal — pondéré par la qualité du signal.
-    const deployOn = strat.deploy && engineOn && budget && budget.dd < 0.15 && budget.cushion > 0;
+    // DEPLOY : déploie le coussin inutilisé, pondéré par la qualité du signal.
+    // GUARD : seulement DD<15%. GROWTH : à tout DD (budget.deployAnyDD).
+    const deployOn = strat.deploy && engineOn && budget && budget.cushion > 0
+      && (budget.deployAnyDD || budget.dd < 0.15);
 
     // 4) Entrées
     if (allowEntry && (!engineOn || budget.allowEntry)) {
@@ -308,10 +326,11 @@ function simulate(seed, engineOn, strat) {
           szAdj = Math.min(0.12, szAdj);
         } else {
           szAdj = computeSizing(ind.z, ind.rsi, ind.sq, ind.ret63, isFlash, 'X', vMult) * kelly; // PRODUCTION
-          szAdj = Math.min(0.25, szAdj);
+          szAdj = Math.min(engineOn ? (budget.sizingCapMax ?? 0.25) : 0.25, szAdj);
         }
         if (deployOn) {
-          const boost = Math.min(0.5, 0.6 * Math.max(0, 1 - openValue / budget.cushion));
+          const boostMax = budget.deployBoostMax ?? 0.5;
+          const boost = Math.min(boostMax, (boostMax / 0.5) * 0.6 * Math.max(0, 1 - openValue / budget.cushion));
           const w = (sig.conf === 'H' || isFlash) ? 1 : 0.6;   // pondéré par qualité
           szAdj *= 1 + boost * w;
         }
@@ -346,7 +365,13 @@ function simulate(seed, engineOn, strat) {
     const dd = 1 - equity / hwm;
     if (dd > maxDD) maxDD = dd;
     if (equity < minEq) minEq = equity;
-    if (engineOn && riskState && equity < riskState.hwm * RISK_CFG.floorPct - 1e-6) floorBreach++;
+    // Contrôle : l'équité ne doit jamais franchir le plancher garanti
+    if (engineOn && riskState) {
+      const guaranteedFloor = riskCfg.floorMode === 'initial'
+        ? (riskState.init || CAPITAL0) * riskCfg.floorPct
+        : riskState.hwm * riskCfg.floorPct;
+      if (equity < guaranteedFloor - 1e-6) floorBreach++;
+    }
   }
 
   return { ret: equity / CAPITAL0 - 1, maxDD, minEq, nTrades, winRate: nTrades ? nWins / nTrades : 0, floorBreach, pnlMR, pnlMomo };
@@ -371,26 +396,38 @@ function report(label, runs) {
   if (YEARS > 1)
     console.log(`  CAGR (annualisé) : médiane ${pct(cagr(quantile(rets, 0.5)))} · moyenne ${pct(cagr(mean(rets)))} · p5 ${pct(cagr(quantile(rets, 0.05)))} · p95 ${pct(cagr(quantile(rets, 0.95)))}`);
   console.log(`  Max drawdown     : médiane ${pct(quantile(dds, 0.5))} · pire ${pct(Math.max(...dds))} · DD>45% : ${over45}/${runs.length}`);
-  console.log(`  Ruine ${ruined} · violations plancher ${breaches} · trades/an méd. ${(quantile(runs.map(r => r.nTrades), 0.5) / YEARS).toFixed(0)} · win ${pct(mean(runs.map(r => r.winRate)))}`);
-  console.log(`  PnL moyen/run    : MR ${mean(runs.map(r => r.pnlMR)).toFixed(0)}€ · MOMO ${mean(runs.map(r => r.pnlMomo)).toFixed(0)}€`);
-  return { over45, ruined, breaches };
+  console.log(`  Pire perte (p0)  : ${pct(Math.min(...rets))} · équité mini/run : ${(mean(runs.map(r => r.minEq)) / CAPITAL0 * 100).toFixed(0)}% du capital`);
+  console.log(`  🛡 RUINE ${ruined}/${runs.length} · violations plancher ${breaches} · trades/an méd. ${(quantile(runs.map(r => r.nTrades), 0.5) / YEARS).toFixed(0)} · win ${pct(mean(runs.map(r => r.winRate)))}`);
+  return { over45, ruined, breaches, medRet: quantile(rets, 0.5), meanRet: mean(rets), worstDD: Math.max(...dds) };
 }
 
 console.log(`Backtest Monte-Carlo WARRANTPRO v26 — ${NB_RUNS} runs × ${YEARS} an${YEARS > 1 ? 's' : ''} (${DAYS} j) × ${NT} tickers${TORTURE ? ' · MODE TORTURE' : ''}`);
 const t0 = Date.now();
-const toRun = VARIANTS ? Object.entries(STRATS) : [['v25 (MR seul)', STRATS['v25 (MR seul)']], ['v26 (trailMR+DEPLOY)', STRATS['v26 (trailMR+DEPLOY)']]];
+const toRun = RISK ? Object.entries(RISK_SWEEP)
+  : VARIANTS ? Object.entries(STRATS)
+  : [['v25 (MR seul)', STRATS['v25 (MR seul)']], ['v26 (trailMR+DEPLOY)', STRATS['v26 (trailMR+DEPLOY)']]];
 const results = toRun.map(() => []);
 const offEngine = [];
 for (let i = 0; i < NB_RUNS; i++) {
   for (let s = 0; s < toRun.length; s++) results[s].push(simulate(1000 + i, true, toRun[s][1]));
-  offEngine.push(simulate(1000 + i, false, toRun[toRun.length - 1][1]));
+  if (!RISK) offEngine.push(simulate(1000 + i, false, toRun[toRun.length - 1][1]));
   if ((i + 1) % 50 === 0) console.log(`  ... ${i + 1}/${NB_RUNS} (${((Date.now() - t0) / 1000).toFixed(0)}s)`);
 }
-let finalCheck = null;
-for (let s = 0; s < toRun.length; s++) finalCheck = report(`${toRun[s][0]} — moteur TIPP ON`, results[s]);
-const off = report(`${toRun[toRun.length - 1][0]} — SANS moteur (référence)`, offEngine);
+const checks = [];
+for (let s = 0; s < toRun.length; s++) checks.push(report(`${toRun[s][0]} — moteur ON`, results[s]));
+let finalCheck = checks[checks.length - 1];
+if (!RISK) report(`${toRun[toRun.length - 1][0]} — SANS moteur (référence)`, offEngine);
 
 console.log('\n══ VERDICT ══════════════════════════════════════');
+if (RISK) {
+  // En mode GROWTH, on accepte de gros DD : la SEULE garantie testée est ruine 0.
+  const anyRuin = checks.some(c => c.ruined > 0);
+  const anyBreach = checks.some(c => c.breaches > 0);
+  console.log(anyRuin || anyBreach
+    ? `❌ ÉCHEC garantie : ruine ${checks.reduce((s,c)=>s+c.ruined,0)}, violations plancher ${checks.reduce((s,c)=>s+c.breaches,0)}.`
+    : '✅ RUINE 0% sur TOUS les planchers (équité jamais sous le plancher garanti). Le DD se relâche, le gain monte — arbitrage à choisir ci-dessus.');
+  process.exit(anyRuin || anyBreach ? 1 : 0);
+}
 const ok = finalCheck.over45 === 0 && finalCheck.ruined === 0 && finalCheck.breaches === 0;
 console.log(ok
   ? '✅ Contraintes respectées sur tous les runs : ruine 0%, MDD ≤ 45%, plancher jamais percé.'

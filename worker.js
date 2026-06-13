@@ -303,7 +303,8 @@ export default {
 
     if (url.pathname === '/ping') {
       return new Response(JSON.stringify({
-        ok: true, version: 'worker_v26_tipp_trail',
+        ok: true, version: 'worker_v27_growth',
+        riskMode: pickRiskMode(env).floorMode === 'initial' ? `GROWTH (plancher ${Math.round(pickRiskMode(env).floorPct*100)}%)` : 'GUARD (DD≤42%)',
         timestamp: new Date().toISOString(),
         env: {
           TG_TOKEN:    env.TG_TOKEN   ? `présent (${env.TG_TOKEN.slice(0,8)}...)` : '❌ MANQUANT',
@@ -731,14 +732,17 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
       if (al.sectorCorr?.status === 'idiosyncratic') szAdj *= 0.7;
       else if (al.sectorCorr?.status === 'sectorial') szAdj *= 1.1;
 
-      szAdj = Math.min(0.25, szAdj);
+      const capMax = risk?.sizingCapMax ?? 0.25;
+      szAdj = Math.min(capMax, szAdj);
 
-      // DEPLOY v26 : déploie le coussin TIPP inutilisé, pondéré par la qualité
-      // du signal (validé : +13.9%/an moyen vs +5.5%, pire DD inchangé)
+      // DEPLOY : déploie le coussin inutilisé, pondéré par la qualité du signal.
+      // GUARD : seulement quand DD<15% (boost ≤ +50%). GROWTH : à tout DD (boost ≤ +200%).
       let deployMult = 1;
-      if (risk && risk.allowEntry && risk.dd < 0.15 && risk.cushion > 0) {
-        const boost = Math.min(0.5, 0.6 * Math.max(0, riskBudgetLeft / risk.cushion));
-        deployMult  = 1 + boost * ((al.sig.conf === 'H' || isFlash) ? 1 : 0.6);
+      const deployOn = risk && risk.allowEntry && risk.cushion > 0 && (risk.deployAnyDD || risk.dd < 0.15);
+      if (deployOn) {
+        const boostMax = risk.deployBoostMax ?? 0.5;
+        const boost    = Math.min(boostMax, (boostMax / 0.5) * 0.6 * Math.max(0, riskBudgetLeft / risk.cushion));
+        deployMult     = 1 + boost * ((al.sig.conf === 'H' || isFlash) ? 1 : 0.6);
         szAdj *= deployMult;
       }
 
@@ -868,7 +872,7 @@ function buildFinalResult(barsMeta, vix, errors, timestamp, env, regime, netLiqu
       features:{ sigma20:Math.round(regime.features.sigma20*1000)/1000, sigma60:Math.round(regime.features.sigma60*1000)/1000, ratio:Math.round(regime.features.ratio*100)/100, ret20:Math.round(regime.features.ret20*1000)/1000, absret5:Math.round(regime.features.absret5*1000)/1000 },
     } : null,
     capital:  { total:CAPITAL, nbAccounts:NB_ACC, perAccount:CAP_PER_ACC, dailyCapPct:vixDailyCap, dailyCapEffective:vixDailyCap*regCapMult,
-      risk: risk ? { equity:Math.round(risk.equity), hwm:Math.round(risk.hwm), floor:Math.round(risk.floor), cushion:Math.round(risk.cushion), dd:Math.round(risk.dd*1000)/1000, mult:risk.mult, allowEntry:risk.allowEntry, openPremium:Math.round(risk.openPremium), budgetLeft:Math.round(Math.max(0, risk.cushion - risk.openPremium)), trimRequired:Math.round(risk.trimRequired||0) } : null },
+      risk: risk ? { mode:risk.mode, floorPct:risk.floorPct, equity:Math.round(risk.equity), hwm:Math.round(risk.hwm), floor:Math.round(risk.floor), cushion:Math.round(risk.cushion), dd:Math.round(risk.dd*1000)/1000, mult:risk.mult, allowEntry:risk.allowEntry, openPremium:Math.round(risk.openPremium), budgetLeft:Math.round(Math.max(0, risk.cushion - risk.openPremium)), trimRequired:Math.round(risk.trimRequired||0) } : null },
     scanned:  Object.keys(barsMeta).length,
     errors,   timestamp,
   };
@@ -988,41 +992,70 @@ const SCAN_CFG = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  MOTEUR DE RISQUE TIPP v25 — ruine 0% / MDD ≤ 45% par construction
+//  MOTEUR DE RISQUE — deux modes, ruine 0% garantie dans les deux cas
 //
-//  Principe (TIPP = Time-Invariant Portfolio Protection, variante CPPI à
-//  plancher cliqueté) : le plancher vaut 58% du plus-haut historique (HWM)
-//  de l'équité et ne descend jamais. La perte maximale d'un warrant étant
-//  sa prime, on impose : somme des primes ouvertes ≤ coussin (équité − plancher).
-//  Même si TOUS les warrants ouverts valent 0 du jour au lendemain,
-//  l'équité reste ≥ 58% du HWM → MDD structurel ≤ 42% (marge 3 pts sous la
-//  contrainte de 45% pour spreads/slippage) et probabilité de ruine = 0.
+//  Propriété commune : la perte max d'un warrant = sa prime. On impose toujours
+//  « somme des primes ouvertes ≤ coussin (équité − plancher) ». Même si TOUS les
+//  warrants ouverts tombent à 0, l'équité reste ≥ plancher > 0 → ruine impossible.
 //
-//  Freins progressifs (anti cash-lock) : on dé-risque bien avant le plancher,
-//  le hard-stop à 35% de DD laisse toujours un coussin ≥ 7% du HWM intact.
+//  • GUARD  (TIPP, plancher cliqueté sur le plus-haut) : plancher = 58% du HWM,
+//    ne descend jamais → MDD structurel ≤ 42%. Freins progressifs. Contrôle du
+//    drawdown au prix du compounding long terme.
+//
+//  • GROWTH (plancher FIXE sur le capital initial) : plancher = floorPct × capital
+//    de départ. La ruine reste impossible (équité ≥ floorPct × capital), mais le
+//    plancher ne monte pas avec les gains → on accepte de gros drawdowns depuis
+//    les sommets pour laisser le gain exploser. Pas de freins.
+//    À utiliser quand seule la ruine compte, pas le drawdown.
 // ═══════════════════════════════════════════════════════════════════════════════
-const RISK_CFG = {
-  floorPct: 0.58,            // plancher = 58% du HWM → perte max structurelle 42%
-  brakes: [                  // dd ≥ seuil → sizing × mult (premier seuil atteint)
-    { dd: 0.35, mult: 0.00 },// hard-stop : plus aucune entrée
-    { dd: 0.25, mult: 0.35 },
-    { dd: 0.15, mult: 0.60 },
-  ],
-  reArmDD: 0.30,             // après hard-stop, réautorise les entrées sous 30% de DD
+const RISK_MODES = {
+  GUARD: {
+    floorMode: 'hwm',  floorPct: 0.58,
+    brakes: [ { dd: 0.35, mult: 0.00 }, { dd: 0.25, mult: 0.35 }, { dd: 0.15, mult: 0.60 } ],
+    reArmDD: 0.30,
+    deployAnyDD: false,  deployBoostMax: 0.5,  sizingCapMax: 0.25,   // contrôle du drawdown
+  },
+  GROWTH: {
+    floorMode: 'initial', floorPct: 0.15,   // ruine impossible : équité ≥ 15% du capital de départ
+    brakes: [],                              // aucun frein → compounding maximal
+    reArmDD: 0,
+    deployAnyDD: true,   deployBoostMax: 2.0, sizingCapMax: 0.40,    // remplit le coussin, DD libre
+  },
 };
 
-function tippRiskBudget(equity, state) {
-  const s = state && state.hwm > 0 ? { hwm: state.hwm, hardStopped: !!state.hardStopped } : { hwm: equity, hardStopped: false };
-  if (equity > s.hwm) s.hwm = equity;            // ratchet : le plancher ne descend jamais
-  const floor   = s.hwm * RISK_CFG.floorPct;
-  const cushion = Math.max(0, equity - floor);   // budget total de primes pouvant aller à 0
+// Défaut GROWTH : maximise le gain (ruine impossible, drawdown élevé accepté).
+// Repasser en contrôle du drawdown : variable d'env RISK_MODE=GUARD.
+// Ajuster l'agressivité : RISK_FLOOR_PCT (0.10 = très agressif … 0.50 = prudent).
+function pickRiskMode(env) {
+  const name = (env?.RISK_MODE || 'GROWTH').toUpperCase();
+  const base = RISK_MODES[name] || RISK_MODES.GROWTH;
+  const fp = Number(env?.RISK_FLOOR_PCT);
+  return (fp > 0 && fp < 1) ? { ...base, floorPct: fp } : base;
+}
+
+const RISK_CFG = RISK_MODES.GUARD;   // défaut rétro-compatible
+
+function tippRiskBudget(equity, state, cfg = RISK_CFG, initialCapital = null) {
+  const s = state && state.hwm > 0
+    ? { hwm: state.hwm, hardStopped: !!state.hardStopped, init: state.init }
+    : { hwm: equity, hardStopped: false, init: initialCapital || equity };
+  if (initialCapital && !(s.init > 0)) s.init = initialCapital;
+  if (equity > s.hwm) s.hwm = equity;                          // ratchet du plus-haut (pour le DD)
+  const floor   = cfg.floorMode === 'initial' ? s.init * cfg.floorPct : s.hwm * cfg.floorPct;
+  const cushion = Math.max(0, equity - floor);                 // budget de primes pouvant aller à 0
   const dd      = s.hwm > 0 ? Math.max(0, 1 - equity / s.hwm) : 0;
-  if (dd >= RISK_CFG.brakes[0].dd) s.hardStopped = true;
-  else if (s.hardStopped && dd < RISK_CFG.reArmDD) s.hardStopped = false;
+  const brakes  = cfg.brakes || [];
+  if (brakes.length && dd >= brakes[0].dd) s.hardStopped = true;
+  else if (s.hardStopped && dd < (cfg.reArmDD || 0)) s.hardStopped = false;
   let mult = 1.0;
-  for (const b of RISK_CFG.brakes) { if (dd >= b.dd) { mult = b.mult; break; } }
+  for (const b of brakes) { if (dd >= b.dd) { mult = b.mult; break; } }
   if (s.hardStopped) mult = 0;
-  return { hwm: s.hwm, floor, cushion, dd, mult, allowEntry: mult > 0, state: s };
+  return {
+    hwm: s.hwm, floor, cushion, dd, mult,
+    allowEntry: cushion > 0 && mult > 0,
+    deployAnyDD: !!cfg.deployAnyDD, deployBoostMax: cfg.deployBoostMax ?? 0.5, sizingCapMax: cfg.sizingCapMax ?? 0.25,
+    state: s,
+  };
 }
 
 // ─── Signaux par paliers v26.1 ────────────────────────────────────────────────
@@ -1375,16 +1408,17 @@ async function computeRiskContext(env, netLiquidity, barsMeta) {
     }
   } catch (e) { console.warn('[risk] positions illisibles:', e.message); }
 
+  const cfg = pickRiskMode(env);
   let state = null;
   try { const raw = await env.TRADING_KV.get('risk_state'); if (raw) state = JSON.parse(raw); } catch (e) {}
-  const budget = tippRiskBudget(equity, state);
+  const budget = tippRiskBudget(equity, state, cfg, CAPITAL_ENV);
   await env.TRADING_KV.put('risk_state', JSON.stringify(budget.state)).catch(() => {});
 
   // Si les primes ouvertes dépassent le coussin (forte appréciation non prise),
   // il faut alléger pour restaurer la garantie plancher.
   const trimRequired = Math.max(0, openPremium - budget.cushion);
-  console.log(`[risk] équité=${equity.toFixed(0)}€ HWM=${budget.hwm.toFixed(0)}€ DD=${(budget.dd*100).toFixed(1)}% plancher=${budget.floor.toFixed(0)}€ primes=${openPremium.toFixed(0)}€ budget restant=${Math.max(0, budget.cushion-openPremium).toFixed(0)}€`);
-  return { ...budget, equity, openPremium, trimRequired };
+  console.log(`[risk] mode=${cfg.floorMode}/${(cfg.floorPct*100).toFixed(0)}% équité=${equity.toFixed(0)}€ HWM=${budget.hwm.toFixed(0)}€ DD=${(budget.dd*100).toFixed(1)}% plancher=${budget.floor.toFixed(0)}€ primes=${openPremium.toFixed(0)}€ budget restant=${Math.max(0, budget.cushion-openPremium).toFixed(0)}€`);
+  return { ...budget, equity, openPremium, trimRequired, mode: cfg.floorMode === 'initial' ? 'GROWTH' : 'GUARD', floorPct: cfg.floorPct };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1424,8 +1458,11 @@ async function sendTelegram(alerts, vix, errors, env, capitalInfo, regime, exits
   const rk = capitalInfo?.risk;
   let riskLine = '';
   if (rk) {
-    riskLine = `\n🛡 *TIPP* : DD ${(rk.dd*100).toFixed(1)}% · plancher ${rk.floor.toLocaleString('fr-FR')}€ · budget primes ${rk.budgetLeft.toLocaleString('fr-FR')}€`;
-    if (!rk.allowEntry)        riskLine += ` · ⛔ *HARD-STOP (entrées bloquées)*`;
+    const modeLabel = rk.mode === 'GROWTH'
+      ? `🚀 *GROWTH* (plancher ${Math.round((rk.floorPct||0.15)*100)}% du capital — DD élevé accepté, ruine impossible)`
+      : `🛡 *GUARD* (DD ≤ 42%)`;
+    riskLine = `\n${modeLabel}\n   DD ${(rk.dd*100).toFixed(1)}% · plancher ${rk.floor.toLocaleString('fr-FR')}€ · budget primes ${rk.budgetLeft.toLocaleString('fr-FR')}€`;
+    if (!rk.allowEntry)        riskLine += ` · ⛔ *budget épuisé (plancher atteint)*`;
     else if (rk.mult < 1)      riskLine += ` · frein ×${rk.mult.toFixed(2)}`;
     if (rk.trimRequired > 0)   riskLine += `\n⚠️ *ALLÉGER ${rk.trimRequired.toLocaleString('fr-FR')}€ de primes* — primes ouvertes > coussin, garantie plancher à restaurer`;
   }
@@ -1623,5 +1660,5 @@ function buildSignalBlock(al) {
 export {
   precompute, scanIndicators, detectSignal, computeSizing, blackScholes,
   vixMultiplier, tippRiskBudget, replaySignals, countSignalsPerMonth,
-  RISK_CFG, SCAN_CFG, TRAIL_CFG, SIGNAL_CFG,
+  RISK_CFG, RISK_MODES, SCAN_CFG, TRAIL_CFG, SIGNAL_CFG,
 };
